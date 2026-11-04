@@ -84,17 +84,25 @@ describe("draftTaskFromTicket", () => {
     updated: null,
   };
 
-  it("titre préfixé par la clé, description avec lien et métadonnées", () => {
-    const draft = draftTaskFromTicket(issue, "Détails");
+  it("titre préfixé par la clé ; instruction, lien, propriétés puis description", () => {
+    const draft = draftTaskFromTicket(issue, "Détails", undefined, "/ticket");
     expect(draft.title).toBe("[ABC-1] Écran de connexion");
     expect(draft.description).toBe(
-      "Ticket Jira : [ABC-1](https://acme.atlassian.net/browse/ABC-1) — Bug · priorité High · À faire\n\n---\n\nDétails\n",
+      [
+        "Lance `/ticket ABC-1` sur ce ticket.",
+        "Ticket Jira : [ABC-1](https://acme.atlassian.net/browse/ABC-1)",
+        "| Propriété Jira | Valeur |\n|---|---|\n| Type | Bug |\n| Statut | À faire |\n| Priorité | High |",
+        "---",
+        "Détails\n",
+      ].join("\n\n"),
     );
+    expect(draft.priority).toBe("high");
+    expect(draft.labels).toEqual(["Bug"]);
   });
 
   it("sans description, pas de séparateur ; titre borné", () => {
     const draft = draftTaskFromTicket({ ...issue, summary: "y".repeat(500) }, "  ");
-    expect(draft.description).not.toContain("---");
+    expect(draft.description).not.toContain("\n\n---\n\n");
     expect(draft.title.length).toBe(MAX_TITLE_LENGTH);
   });
 });

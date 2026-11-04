@@ -29,6 +29,8 @@ interface FakeJiraIssue {
   category: "new" | "indeterminate" | "done";
   assignedToMe?: boolean;
   description?: unknown;
+  /** Champs Jira supplémentaires renvoyés quand ils sont demandés (import). */
+  extra?: Record<string, unknown>;
 }
 
 class FakeJira {
@@ -72,6 +74,9 @@ class FakeJira {
       const body = this.toJson(issue);
       const fields = url.searchParams.get("fields")?.split(",") ?? [];
       if (fields.includes("description")) Object.assign(body.fields, { description: issue.description ?? null });
+      for (const [name, value] of Object.entries(issue.extra ?? {})) {
+        if (fields.includes(name)) Object.assign(body.fields, { [name]: value });
+      }
       return json(200, body);
     }
 
@@ -548,8 +553,54 @@ describe("créer une tâche depuis un ticket", () => {
     );
     expect(draft.key).toBe("ABC-1");
     expect(draft.title).toBe("[ABC-1] Écran de connexion");
-    expect(draft.description.startsWith(`Ticket Jira : [ABC-1](${SITE}/browse/ABC-1)`)).toBe(true);
+    expect(draft.description.startsWith("Lance `/ticket ABC-1` sur ce ticket.\n\n")).toBe(true);
+    expect(draft.description).toContain(`Ticket Jira : [ABC-1](${SITE}/browse/ABC-1)`);
     expect(draft.description).toContain("Le bouton ne répond pas.");
+  });
+
+  it("reprend toutes les propriétés du ticket : priorité, libellés, tableau des propriétés", async () => {
+    Object.assign(jira.issues.get("ABC-1")!, {
+      extra: {
+        priority: { name: "Highest" },
+        reporter: { displayName: "Bob" },
+        labels: ["front", "Story", "connexion"],
+        components: [{ name: "Web" }, { name: "Auth" }],
+        fixVersions: [{ name: "2026.12" }],
+        parent: { key: "ABC-100", fields: { summary: "Refonte | connexion" } },
+        duedate: "2026-12-01",
+        created: "2026-10-01T09:00:00.000+0200",
+      },
+    });
+    const draft = await harness.performAction<ImportedTaskDraft>("prepare-import", { input: "ABC-1" }, { companyId: COMPANY });
+    expect(draft.priority).toBe("critical");
+    expect(draft.labels).toEqual(["Story", "front", "connexion"]);
+    for (const row of [
+      "| Type | Story |",
+      "| Statut | En cours |",
+      "| Priorité | Highest |",
+      "| Assigné | Alice |",
+      "| Rapporteur | Bob |",
+      `| Parent | [ABC-100](${SITE}/browse/ABC-100) Refonte \\| connexion |`,
+      "| Composants | Web, Auth |",
+      "| Versions | 2026.12 |",
+      "| Échéance | 2026-12-01 |",
+      "| Créé le | 2026-10-01 |",
+    ]) {
+      expect(draft.description).toContain(row);
+    }
+    const call = jira.calls.at(-1)!;
+    expect(call).toBe("GET /rest/api/3/issue/ABC-1");
+  });
+
+  it("suit la commande configurée, ou n'en met aucune", async () => {
+    await setupHarness({ ...CONFIG, importCommand: "/traite" });
+    let draft = await harness.performAction<ImportedTaskDraft>("prepare-import", { input: "ABC-1" }, { companyId: COMPANY });
+    expect(draft.description.startsWith("Lance `/traite ABC-1` sur ce ticket.")).toBe(true);
+
+    await setupHarness({ ...CONFIG, importCommand: "  " });
+    draft = await harness.performAction<ImportedTaskDraft>("prepare-import", { input: "ABC-1" }, { companyId: COMPANY });
+    expect(draft.description.startsWith("Ticket Jira : ")).toBe(true);
+    expect(draft.priority).toBe("medium");
   });
 
   it("refuse une saisie invalide ou un ticket inexistant", async () => {

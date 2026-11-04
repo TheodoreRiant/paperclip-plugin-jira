@@ -9,7 +9,7 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.4.0",
+  version: "0.5.0",
   displayName: "Jira link",
   description:
     "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
@@ -52,6 +52,13 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Jeton d'API Atlassian",
         description: "Créé sur id.atlassian.com → Sécurité → Jetons d'API. Stocké comme secret Paperclip.",
         format: "secret-ref",
+      },
+      importCommand: {
+        type: "string",
+        title: "Instruction des tâches créées depuis un ticket",
+        description:
+          "Commande à lancer, placée en tête de la tâche et suivie de la clé du ticket (ex. « /ticket » → « Lance `/ticket ABC-123` sur ce ticket. »). Laisser vide pour ne mettre aucune instruction.",
+        default: "/ticket",
       },
     },
   },

@@ -44,6 +44,21 @@ export class JiraError extends Error {
 
 export const ISSUE_FIELDS = ["summary", "status", "issuetype", "assignee", "priority", "updated"] as const;
 
+/** Champs supplémentaires lus pour créer une tâche depuis un ticket. */
+export const IMPORT_FIELDS = ["description", "reporter", "labels", "components", "fixVersions", "parent", "duedate", "created"] as const;
+
+/** Propriétés d'un ticket reprises dans la tâche créée depuis celui-ci. */
+export interface JiraImportDetails {
+  reporter: string | null;
+  labels: string[];
+  components: string[];
+  fixVersions: string[];
+  parent: { key: string; summary: string | null; url: string } | null;
+  /** `AAAA-MM-JJ`. */
+  dueDate: string | null;
+  created: string | null;
+}
+
 /** Taille de lot pour `key in (...)` : reste loin des limites de longueur JQL. */
 export const SEARCH_BATCH_SIZE = 50;
 
@@ -162,13 +177,37 @@ export class JiraClient {
     return this.searchJql(ASSIGNED_TO_ME_JQL, maxResults);
   }
 
-  /** Ticket avec sa description (document ADF brut), pour créer une tâche. */
-  async getIssueWithDescription(key: string): Promise<{ issue: JiraIssueSummary; description: unknown }> {
-    const query = new URLSearchParams({ fields: [...ISSUE_FIELDS, "description"].join(",") });
+  /**
+   * Ticket complet pour créer une tâche : description (document ADF brut) et
+   * propriétés reprises dans la tâche (rapporteur, libellés, composants,
+   * versions, parent, échéance).
+   */
+  async getIssueForImport(key: string): Promise<{ issue: JiraIssueSummary; description: unknown; details: JiraImportDetails }> {
+    const query = new URLSearchParams({ fields: [...ISSUE_FIELDS, ...IMPORT_FIELDS].join(",") });
     const body = (await this.request("GET", `/rest/api/3/issue/${encodeURIComponent(key)}?${query}`)) as {
-      fields?: { description?: unknown };
+      fields?: Record<string, any>;
     };
-    return { issue: this.toSummary(body), description: body?.fields?.description ?? null };
+    const fields = body?.fields ?? {};
+    const parentKey = stringOrNull(fields.parent?.key);
+    return {
+      issue: this.toSummary(body),
+      description: fields.description ?? null,
+      details: {
+        reporter: stringOrNull(fields.reporter?.displayName),
+        labels: stringList(fields.labels),
+        components: namesOf(fields.components),
+        fixVersions: namesOf(fields.fixVersions),
+        parent: parentKey
+          ? {
+              key: parentKey,
+              summary: stringOrNull(fields.parent?.fields?.summary),
+              url: `${this.credentials.siteUrl}/browse/${encodeURIComponent(parentKey)}`,
+            }
+          : null,
+        dueDate: stringOrNull(fields.duedate),
+        created: stringOrNull(fields.created),
+      },
+    };
   }
 
   private async searchJql(jql: string, maxResults: number): Promise<JiraIssueSummary[]> {
@@ -251,6 +290,14 @@ export class JiraClient {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0) : [];
+}
+
+function namesOf(value: unknown): string[] {
+  return Array.isArray(value) ? stringList(value.map((v) => (v && typeof v === "object" ? (v as { name?: unknown }).name : null))) : [];
 }
 
 function errorMessage(err: unknown): string {

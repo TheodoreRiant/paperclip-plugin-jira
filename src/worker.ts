@@ -330,8 +330,8 @@ const plugin = definePlugin({
       const key = issueKeyFromInput(input, config.siteHost);
       if (!key) throw new Error(`« ${input} » n'est ni une clé Jira (ex. ABC-123) ni une URL de ${config.siteHost}.`);
       try {
-        const { issue, description } = await client.getIssueWithDescription(key);
-        return draftTaskFromTicket(issue, adfToMarkdown(description));
+        const { issue, description, details } = await client.getIssueForImport(key);
+        return draftTaskFromTicket(issue, adfToMarkdown(description), details, config.importCommand);
       } catch (err) {
         throw new Error(describeError(err));
       }

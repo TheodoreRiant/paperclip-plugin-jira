@@ -24,6 +24,7 @@ import {
   type OverviewRow,
   type TaskLite,
 } from "../overview.js";
+import { labelColor, matchLabels, type HostLabel } from "../import.js";
 import {
   Button,
   COMMAND_ITEM_CLASS,
@@ -120,11 +121,44 @@ interface CreatedTask {
   identifier: string | null;
 }
 
-async function createTaskFromDraft(companyId: string, draft: ImportedTaskDraft): Promise<CreatedTask> {
-  return hostJson<CreatedTask>(`/api/companies/${encodeURIComponent(companyId)}/issues`, {
+/**
+ * Crée la tâche avec les propriétés du ticket : titre, description (instruction
+ * et propriétés Jira), priorité et libellés. Les libellés existants sont
+ * réutilisés par nom, les autres créés. Si les libellés ne peuvent pas être
+ * posés, la tâche est quand même créée et `labelError` l'explique.
+ */
+async function createTaskFromDraft(
+  companyId: string,
+  draft: ImportedTaskDraft,
+): Promise<CreatedTask & { labelError: string | null }> {
+  const base = `/api/companies/${encodeURIComponent(companyId)}`;
+  let labelIds: string[] = [];
+  let labelError: string | null = null;
+  if (draft.labels.length > 0) {
+    try {
+      const { ids, missing } = matchLabels(draft.labels, await hostJson<HostLabel[]>(`${base}/labels`));
+      for (const name of missing) {
+        const created = await hostJson<HostLabel>(`${base}/labels`, {
+          method: "POST",
+          body: JSON.stringify({ name, color: labelColor(name) }),
+        });
+        ids.push(created.id);
+      }
+      labelIds = ids;
+    } catch (err) {
+      labelError = errorText(err);
+    }
+  }
+  const task = await hostJson<CreatedTask>(`${base}/issues`, {
     method: "POST",
-    body: JSON.stringify({ title: draft.title, description: draft.description }),
+    body: JSON.stringify({
+      title: draft.title,
+      description: draft.description,
+      ...(draft.priority ? { priority: draft.priority } : {}),
+      ...(labelIds.length > 0 ? { labelIds } : {}),
+    }),
   });
+  return { ...task, labelError };
 }
 
 function errorText(err: unknown): string {
@@ -604,7 +638,8 @@ function ImportForm({
       const ref = task.identifier ?? task.id;
       toast({
         title: task.identifier ? `Tâche ${task.identifier} créée depuis ${draft.key}.` : `Tâche créée depuis ${draft.key}.`,
-        tone: "success",
+        body: task.labelError ? `Libellés non posés : ${task.labelError}` : undefined,
+        tone: task.labelError ? "warn" : "success",
         action: { label: "Ouvrir", href: navigation.resolveHref(`/issues/${ref}`) },
       });
       onCreated?.(task);

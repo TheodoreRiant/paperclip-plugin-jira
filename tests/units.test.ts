@@ -4,6 +4,7 @@ import { JiraError, type JiraIssueSummary } from "../src/jira-client.js";
 import { issueKeyFromInput, issueKeyFromUrl, normalizeIssueKey } from "../src/jira-url.js";
 import { issueKeysInText, parseLinksDocument, renderLinksDocument } from "../src/links.js";
 import { resultFromError, snapshotFromIssue } from "../src/status.js";
+import { HOST_LABEL_COLORS, importInstruction, labelColor, labelNames, matchLabels, priorityFromJira } from "../src/import.js";
 
 const HOST = "acme.atlassian.net";
 const SITE = `https://${HOST}`;
@@ -120,5 +121,41 @@ describe("status", () => {
       ok: true,
       snapshot: { statusLabel: "Introuvable", statusCategory: "unknown" },
     });
+  });
+});
+
+describe("import : propriétés reprises dans la tâche", () => {
+  it("convertit les priorités Jira, ancien schéma compris", () => {
+    expect(priorityFromJira("Highest")).toBe("critical");
+    expect(priorityFromJira("Blocker")).toBe("critical");
+    expect(priorityFromJira("High")).toBe("high");
+    expect(priorityFromJira("Major")).toBe("high");
+    expect(priorityFromJira(" medium ")).toBe("medium");
+    expect(priorityFromJira("Minor")).toBe("low");
+    expect(priorityFromJira("Lowest")).toBe("low");
+    expect(priorityFromJira("P2 maison")).toBeNull();
+    expect(priorityFromJira(null)).toBeNull();
+  });
+
+  it("normalise les libellés : espaces, longueur maximale, doublons sans tenir compte de la casse", () => {
+    expect(labelNames(["Bug", null, " bug ", "a  b", "x".repeat(60)])).toEqual(["Bug", "a b", "x".repeat(48)]);
+  });
+
+  it("réutilise les libellés existants par nom et liste ceux à créer", () => {
+    const existing = [
+      { id: "l1", name: "bug" },
+      { id: "l2", name: "Front " },
+    ];
+    expect(matchLabels(["Bug", "front", "Story"], existing)).toEqual({ ids: ["l1", "l2"], missing: ["Story"] });
+  });
+
+  it("donne une couleur stable, prise dans la palette de Paperclip", () => {
+    expect(HOST_LABEL_COLORS).toContain(labelColor("Story"));
+    expect(labelColor("Story")).toBe(labelColor("story"));
+  });
+
+  it("formule l'instruction, ou rien si la commande est vide", () => {
+    expect(importInstruction("/ticket", "ABC-1")).toBe("Lance `/ticket ABC-1` sur ce ticket.");
+    expect(importInstruction("  ", "ABC-1")).toBeNull();
   });
 });

@@ -14,7 +14,14 @@ export interface JiraConfig {
   email: string;
   /** Référence de secret vers le jeton d'API Atlassian. */
   apiTokenRef: unknown;
+  /**
+   * Commande indiquée en tête d'une tâche créée depuis un ticket, suivie de la
+   * clé (`/ticket ABC-123`). Chaîne vide : pas d'instruction.
+   */
+  importCommand: string;
 }
+
+export const DEFAULT_IMPORT_COMMAND = "/ticket";
 
 export type ConfigParseResult =
   | { ok: true; config: JiraConfig }
@@ -52,8 +59,10 @@ export function parseConfig(raw: Record<string, unknown> | null | undefined): Co
     errors.push("Le jeton d'API doit être choisi dans les secrets Paperclip.");
   }
 
+  const importCommand = typeof source.importCommand === "string" ? source.importCommand.trim() : DEFAULT_IMPORT_COMMAND;
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, config: { siteUrl, siteHost, email, apiTokenRef } };
+  return { ok: true, config: { siteUrl, siteHost, email, apiTokenRef, importCommand } };
 }
 
 function isSecretRef(value: unknown): boolean {
