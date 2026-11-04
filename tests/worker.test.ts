@@ -37,6 +37,8 @@ class FakeJira {
   /** Comme le vrai Jira : JQL `key in (...)` → 400 si une clé n'existe pas. */
   rejectUnknownKeysInJql = false;
   calls: string[] = [];
+  /** Tickets « consultés récemment » renvoyés par le picker pour une requête vide. */
+  recent: string[] = [];
   lastAuthorization: string | null = null;
 
   add(key: string, summary: string, status = "À faire", category: FakeJiraIssue["category"] = "new") {
@@ -51,6 +53,17 @@ class FakeJira {
     if (this.authStatus) return json(this.authStatus, { errorMessages: ["Unauthorized"] });
 
     if (url.pathname === "/rest/api/3/myself") return json(200, { displayName: "Bot", accountId: "a1" });
+
+    // Comme Jira : vide → historique ; sinon début de clé ou début de mot du résumé.
+    if (url.pathname === "/rest/api/3/issue/picker") {
+      const q = (url.searchParams.get("query") ?? "").toLowerCase();
+      const all = [...this.issues.values()];
+      const hits = q
+        ? all.filter((i) => i.key.toLowerCase().startsWith(q) || i.summary.toLowerCase().split(/\s+/).some((w) => w.startsWith(q)))
+        : all.filter((i) => this.recent.includes(i.key));
+      const issues = hits.map((i) => ({ key: i.key, summaryText: i.summary, summary: `<b>${i.summary}</b>` }));
+      return json(200, { sections: [{ id: q ? "cs" : "hs", issues }] });
+    }
 
     const single = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(url.pathname);
     if (single?.[1]) {
@@ -76,7 +89,7 @@ class FakeJira {
         const mine = [...this.issues.values()].filter((i) => i.assignedToMe && i.category !== "done");
         return json(200, { issues: mine.map((i) => this.toJson(i)) });
       }
-      const text = /^text ~ "(.*)" ORDER BY updated DESC$/.exec(body.jql)?.[1] ?? "";
+      const text = (/^text ~ "(.*)" ORDER BY updated DESC$/.exec(body.jql)?.[1] ?? "").replace(/\*$/, "");
       const matches = [...this.issues.values()].filter((i) => i.summary.toLowerCase().includes(text.toLowerCase()));
       return json(200, { issues: matches.map((i) => this.toJson(i)) });
     }
@@ -384,6 +397,51 @@ describe("lier / délier", () => {
     expect(byKey.results).toMatchObject([{ key: "ABC-2" }]);
     const byText = await harness.performAction<{ results: unknown[] }>("search", { text: "connexion" }, { companyId: COMPANY });
     expect(byText.results).toMatchObject([{ key: "ABC-1" }, { key: "ABC-7" }]);
+  });
+
+  describe("suggestions pendant la frappe", () => {
+    type Suggest = { recent: boolean; results: { key: string; statusName: string; summary: string }[] };
+    const suggest = (query: string) => harness.performAction<Suggest>("suggest", { query }, { companyId: COMPANY });
+
+    it("propose les tickets dès un début de mot, avec leur statut", async () => {
+      const r = await suggest("conn");
+      expect(r.recent).toBe(false);
+      expect(r.results.map((i) => i.key).sort()).toEqual(["ABC-1", "ABC-7"]);
+      expect(r.results.every((i) => i.statusName !== "Inconnu")).toBe(true);
+    });
+
+    it("propose les tickets d'une clé partielle", async () => {
+      jira.add("ABC-21", "Autre ticket");
+      const r = await suggest("abc-2");
+      expect(r.results.map((i) => i.key)).toEqual(["ABC-2", "ABC-21"]);
+    });
+
+    it("met le ticket exact en tête pour une clé complète, une seule fois", async () => {
+      jira.add("ABC-21", "Autre ticket");
+      const r = await suggest("ABC-2");
+      expect(r.results.map((i) => i.key)).toEqual(["ABC-2", "ABC-21"]);
+    });
+
+    it("une URL donne uniquement son ticket", async () => {
+      const r = await suggest(`${SITE}/browse/ABC-7`);
+      expect(r.results.map((i) => i.key)).toEqual(["ABC-7"]);
+    });
+
+    it("champ vide : tickets consultés récemment", async () => {
+      jira.recent = ["ABC-7"];
+      const r = await suggest("");
+      expect(r).toMatchObject({ recent: true, results: [{ key: "ABC-7" }] });
+    });
+
+    it("se rabat sur la recherche plein texte quand Jira ne suggère rien", async () => {
+      const r = await suggest("onnex");
+      expect(r.results.map((i) => i.key).sort()).toEqual(["ABC-1", "ABC-7"]);
+      expect(jira.calls).toContain("GET /rest/api/3/issue/picker");
+    });
+
+    it("rien du tout : liste vide, sans erreur", async () => {
+      expect((await suggest("zzzz")).results).toEqual([]);
+    });
   });
 });
 

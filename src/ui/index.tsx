@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   Spinner,
   StatusBadge,
@@ -294,17 +303,199 @@ function looksLikeKeyOrUrl(value: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(value) || /^https?:\/\//i.test(value);
 }
 
+/** Délai après la dernière frappe avant d'interroger Jira. */
+const SUGGEST_DEBOUNCE_MS = 250;
+
+interface SuggestResponse {
+  recent: boolean;
+  results: JiraIssue[];
+}
+
+/**
+ * Champ de recherche Jira avec suggestions en direct : les tickets
+ * apparaissent au fil de la frappe (clé partielle, début de mot, URL). Champ
+ * vide : tickets consultés récemment dans Jira. Clavier : ↑ ↓ pour choisir,
+ * Entrée pour valider, Échap pour fermer la liste.
+ */
+function TicketSearchBox({
+  companyId,
+  ariaLabel,
+  actionLabel,
+  busyKey,
+  disabled,
+  autoFocus,
+  aside,
+  onPick,
+}: {
+  companyId: string;
+  ariaLabel: string;
+  /** Libellé de l'action d'une suggestion (« Lier », « Créer la tâche »…). */
+  actionLabel: (issue: JiraIssue) => string;
+  /** Clé en cours de traitement (affiche « … » sur sa ligne). */
+  busyKey: string | null;
+  disabled: boolean;
+  autoFocus?: boolean;
+  /** Information complémentaire sur une suggestion (ex. tâche déjà liée). */
+  aside?: (issue: JiraIssue) => ReactNode;
+  /** Reçoit la clé choisie, ou la saisie brute (clé / URL) validée par Entrée. */
+  onPick: (value: string) => Promise<boolean>;
+}) {
+  const suggestAction = usePluginAction("suggest");
+  const suggestRef = useRef(suggestAction);
+  suggestRef.current = suggestAction;
+  const cache = useRef(new Map<string, SuggestResponse>());
+  const requestSeq = useRef(0);
+  const [input, setInput] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [response, setResponse] = useState<SuggestResponse | null>(null);
+  const [highlight, setHighlight] = useState(0);
+  const query = input.trim();
+
+  useEffect(() => {
+    if (!focused && !query) return;
+    const cached = cache.current.get(query);
+    if (cached) {
+      setResponse(cached);
+      setHighlight(0);
+      setLoading(false);
+      return;
+    }
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    const timer = setTimeout(
+      () => {
+        suggestRef
+          .current({ companyId, query })
+          .then((r) => {
+            const result = r as SuggestResponse;
+            cache.current.set(query, result);
+            if (seq !== requestSeq.current) return; // une frappe plus récente a pris le relais
+            setResponse(result);
+            setHighlight(0);
+            setError(null);
+          })
+          .catch((err) => seq === requestSeq.current && setError(errorText(err)))
+          .finally(() => seq === requestSeq.current && setLoading(false));
+      },
+      query ? SUGGEST_DEBOUNCE_MS : 0,
+    );
+    return () => clearTimeout(timer);
+  }, [companyId, query, focused]);
+
+  const results = response?.results ?? [];
+
+  async function pick(value: string) {
+    if (await onPick(value)) {
+      setInput("");
+      setOpen(false);
+      cache.current.clear(); // les tickets récents ont pu changer
+    }
+  }
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      if (results.length === 0) return;
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setHighlight((h) => (h + step + results.length) % results.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (disabled) return;
+      const chosen = open ? results[highlight] : undefined;
+      // La saisie exacte prime tant que les suggestions ne l'ont pas rattrapée.
+      if (looksLikeKeyOrUrl(query) && (loading || !chosen)) void pick(query);
+      else if (chosen) void pick(chosen.key);
+    } else if (event.key === "Escape" && open) {
+      // Ferme la liste sans fermer la fenêtre qui contient le champ.
+      event.stopPropagation();
+      setOpen(false);
+    }
+  }
+
+  const showList = open && (focused || busyKey !== null);
+
+  return (
+    <div style={styles.stack}>
+      <div style={{ ...styles.row, flexWrap: "nowrap" }}>
+        <input
+          style={styles.input}
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => {
+            setFocused(true);
+            setOpen(true);
+          }}
+          onBlur={() => setFocused(false)}
+          onKeyDown={onKeyDown}
+          placeholder="Tapez une clé (ABC-12…), quelques mots ou collez une URL"
+          aria-label={ariaLabel}
+          aria-autocomplete="list"
+          aria-expanded={showList}
+          role="combobox"
+          disabled={disabled}
+          autoFocus={autoFocus}
+        />
+        <span style={{ width: 16, display: "inline-flex" }}>{loading ? <Spinner size="sm" /> : null}</span>
+      </div>
+      {error ? <div style={styles.error}>{error}</div> : null}
+      {showList && response ? (
+        <div role="listbox" aria-label={ariaLabel} style={{ ...styles.stack, gap: 2 }}>
+          {response.recent && results.length > 0 ? <div style={styles.muted}>Consultés récemment dans Jira</div> : null}
+          {results.length === 0 && !loading ? (
+            <div style={styles.muted}>{query ? "Aucun ticket ne correspond." : "Commencez à taper pour chercher un ticket."}</div>
+          ) : null}
+          {results.map((issue, index) => (
+            <div
+              key={issue.key}
+              role="option"
+              aria-selected={index === highlight}
+              // mousedown : choisir avant que le champ ne perde le focus.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                if (!disabled) void pick(issue.key);
+              }}
+              onMouseEnter={() => setHighlight(index)}
+              style={{
+                ...styles.row,
+                flexWrap: "nowrap",
+                padding: "6px 8px",
+                borderRadius: 6,
+                cursor: disabled ? "default" : "pointer",
+                background: index === highlight ? "var(--accent, rgba(127,127,127,0.15))" : "transparent",
+              }}
+            >
+              <strong style={{ whiteSpace: "nowrap" }}>{issue.key}</strong>
+              <StatusBadge label={issue.statusName} status={badgeVariant(issue.statusCategoryKey)} />
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {issue.summary}
+              </span>
+              {aside?.(issue)}
+              <span style={{ ...styles.muted, whiteSpace: "nowrap" }}>
+                {busyKey === issue.key ? "…" : index === highlight ? `${actionLabel(issue)} ↵` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId: string; onLinked: () => void }) {
   const prepareLink = usePluginAction("prepare-link");
-  const search = usePluginAction("search");
   const toast = usePluginToast();
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<JiraIssue[] | null>(null);
 
-  async function link(value: string) {
-    setBusy(true);
+  async function link(value: string): Promise<boolean> {
+    setBusyKey(value);
     setError(null);
     try {
       const change = (await prepareLink({ companyId, issueId, input: value })) as LinkDocumentChange;
@@ -314,73 +505,29 @@ function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId
         await applyDocumentChange(issueId, change);
         toast({ title: `Ticket ${change.key} lié.`, tone: "success" });
       }
-      setInput("");
-      setResults(null);
       onLinked();
+      return true;
     } catch (err) {
       setError(errorText(err));
+      return false;
     } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    const value = input.trim();
-    if (!value) return;
-    // Clé ou URL : on lie directement. Sinon : recherche plein texte.
-    if (looksLikeKeyOrUrl(value)) {
-      await link(value);
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const response = (await search({ companyId, text: value })) as { results: JiraIssue[] };
-      setResults(response.results);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
   }
 
   return (
-    <form onSubmit={onSubmit} style={styles.stack}>
-      <div style={styles.row}>
-        <input
-          style={styles.input}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Clé (ABC-123), URL du ticket ou texte à chercher"
-          aria-label="Ticket Jira"
-          disabled={busy}
-          autoFocus
-        />
-        <button type="submit" style={styles.button} disabled={busy || !input.trim()}>
-          {busy ? "…" : "Lier / chercher"}
-        </button>
-      </div>
+    <div style={styles.stack}>
+      <TicketSearchBox
+        companyId={companyId}
+        ariaLabel="Ticket Jira à lier"
+        actionLabel={() => "Lier"}
+        busyKey={busyKey}
+        disabled={busyKey !== null}
+        autoFocus
+        onPick={link}
+      />
       {error ? <div style={styles.error}>{error}</div> : null}
-      {results ? (
-        results.length === 0 ? (
-          <div style={styles.muted}>Aucun ticket trouvé.</div>
-        ) : (
-          <div style={styles.stack}>
-            {results.map((issue) => (
-              <div key={issue.key} style={styles.row}>
-                <button type="button" style={styles.button} onClick={() => link(issue.key)} disabled={busy}>
-                  Lier
-                </button>
-                <strong>{issue.key}</strong>
-                <span>{issue.summary}</span>
-                <span style={styles.muted}>({issue.statusName})</span>
-              </div>
-            ))}
-          </div>
-        )
-      ) : null}
-    </form>
+    </div>
   );
 }
 
@@ -463,15 +610,20 @@ function ImportForm({
 }) {
   const prepareImport = usePluginAction("prepare-import");
   const myTickets = usePluginAction("my-tickets");
-  const search = usePluginAction("search");
   const toast = usePluginToast();
   const navigation = useHostNavigation();
-  const [input, setInput] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<{ title: string; issues: JiraIssue[] } | null>(null);
 
-  async function create(value: string) {
+  const alreadyLinked = (issue: JiraIssue) => {
+    const tasks = existing?.get(issue.key) ?? [];
+    return tasks.length === 0 ? null : (
+      <span style={{ ...styles.muted, whiteSpace: "nowrap" }}>Déjà lié : {tasks.map((t) => t.identifier ?? t.title).join(", ")}</span>
+    );
+  };
+
+  async function create(value: string): Promise<boolean> {
     setBusy(value);
     setError(null);
     try {
@@ -483,61 +635,48 @@ function ImportForm({
         tone: "success",
         action: { label: "Ouvrir", href: navigation.resolveHref(`/issues/${ref}`) },
       });
-      setInput("");
       onCreated?.(task);
       navigation.navigate(`/issues/${ref}`);
+      return true;
     } catch (err) {
       setError(errorText(err));
+      return false;
     } finally {
       setBusy(null);
     }
   }
 
-  async function list(kind: "mine" | "search", text?: string) {
-    setBusy(kind);
+  async function listMine() {
+    setBusy("mine");
     setError(null);
     try {
-      const response =
-        kind === "mine"
-          ? ((await myTickets({ companyId })) as { results: JiraIssue[] })
-          : ((await search({ companyId, text })) as { results: JiraIssue[] });
-      setResults({
-        title: kind === "mine" ? "Mes tickets assignés (non terminés)" : `Résultats pour « ${text} »`,
-        issues: response.results,
-      });
+      const response = (await myTickets({ companyId })) as { results: JiraIssue[] };
+      setResults({ title: "Mes tickets assignés (non terminés)", issues: response.results });
     } catch (err) {
       setError(errorText(err));
     } finally {
       setBusy(null);
     }
-  }
-
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    const value = input.trim();
-    if (!value) return;
-    if (looksLikeKeyOrUrl(value)) await create(value);
-    else await list("search", value);
   }
 
   return (
     <div style={styles.stack}>
-      <form onSubmit={onSubmit} style={styles.row}>
-        <input
-          style={styles.input}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Clé (ABC-123), URL du ticket ou texte à chercher"
-          aria-label="Ticket Jira à importer"
-          disabled={busy !== null}
-        />
-        <button type="submit" style={styles.primary} disabled={busy !== null || !input.trim()}>
-          {busy && busy !== "mine" ? "…" : "Créer la tâche"}
-        </button>
-        <button type="button" style={styles.button} onClick={() => list("mine")} disabled={busy !== null}>
+      <div style={{ ...styles.row, alignItems: "flex-start", flexWrap: "nowrap" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TicketSearchBox
+            companyId={companyId}
+            ariaLabel="Ticket Jira à importer"
+            actionLabel={(issue) => ((existing?.get(issue.key)?.length ?? 0) > 0 ? "Créer quand même" : "Créer la tâche")}
+            busyKey={busy}
+            disabled={busy !== null}
+            aside={alreadyLinked}
+            onPick={create}
+          />
+        </div>
+        <button type="button" style={{ ...styles.button, whiteSpace: "nowrap" }} onClick={listMine} disabled={busy !== null}>
           {busy === "mine" ? "…" : "Mes tickets assignés"}
         </button>
-      </form>
+      </div>
       {error ? <div style={styles.error}>{error}</div> : null}
       {results ? (
         <div style={styles.stack}>

@@ -97,6 +97,66 @@ export class JiraClient {
     return this.searchJql(`text ~ "${escaped}" ORDER BY updated DESC`, maxResults);
   }
 
+  /**
+   * Suggestions pendant la frappe : API `issue/picker` de Jira (celle de sa
+   * propre barre de recherche), qui gère les clés partielles et les débuts de
+   * mots. Requête vide : tickets consultés récemment. Les statuts sont relus
+   * en un seul appel JQL ; si Jira ne propose rien, repli sur une recherche
+   * plein texte avec joker de fin (`conn*`).
+   */
+  async suggest(query: string, maxResults = 8): Promise<JiraIssueSummary[]> {
+    const q = query.trim();
+    const params = new URLSearchParams({ query: q, showSubTasks: "true", showSubTaskParent: "true" });
+    const body = (await this.request("GET", `/rest/api/3/issue/picker?${params}`)) as {
+      sections?: { issues?: { key?: unknown; summaryText?: unknown }[] }[];
+    };
+    const picked = new Map<string, string>();
+    for (const section of body.sections ?? []) {
+      for (const issue of section.issues ?? []) {
+        if (typeof issue.key === "string" && issue.key && !picked.has(issue.key)) {
+          picked.set(issue.key, typeof issue.summaryText === "string" ? issue.summaryText : "");
+        }
+      }
+    }
+    const keys = [...picked.keys()].slice(0, maxResults);
+    if (keys.length === 0) return q.length >= 2 ? this.searchPrefix(q, maxResults) : [];
+
+    let details: Map<string, JiraIssueSummary>;
+    try {
+      details = await this.getIssuesByKeys(keys);
+    } catch (err) {
+      if (!(err instanceof JiraError) || err.kind !== "bad_request") throw err;
+      details = new Map();
+    }
+    return keys.map(
+      (key) =>
+        details.get(key) ?? {
+          id: "",
+          key,
+          url: `${this.credentials.siteUrl}/browse/${encodeURIComponent(key)}`,
+          summary: picked.get(key) ?? "",
+          issueType: null,
+          statusName: "Inconnu",
+          statusCategoryKey: "undefined",
+          assignee: null,
+          priority: null,
+          updated: null,
+        },
+    );
+  }
+
+  /** Recherche plein texte sur un début de mot. Une syntaxe refusée par Jira donne une liste vide. */
+  private async searchPrefix(text: string, maxResults: number): Promise<JiraIssueSummary[]> {
+    const cleaned = text.replace(/[\\"*?~^(){}[\]!+:&|-]/g, " ").replace(/\s+/g, " ").trim();
+    if (!cleaned) return [];
+    try {
+      return await this.searchJql(`text ~ "${cleaned}*" ORDER BY updated DESC`, maxResults);
+    } catch (err) {
+      if (err instanceof JiraError && err.kind === "bad_request") return [];
+      throw err;
+    }
+  }
+
   /** Tickets non terminés assignés au compte du jeton, les plus récents d'abord. */
   async assignedToMe(maxResults = 30): Promise<JiraIssueSummary[]> {
     return this.searchJql(ASSIGNED_TO_ME_JQL, maxResults);

@@ -219,6 +219,25 @@ const plugin = definePlugin({
       return { results: await client.searchText(text) };
     });
 
+    // ── Suggestions pendant la frappe (vide : tickets récents) ──────────
+    context.actions.register("suggest", async (params, actionContext) => {
+      const companyId = actionContext.companyId ?? requireString(params, "companyId");
+      const query = typeof params.query === "string" ? params.query.trim().slice(0, 200) : "";
+      const { client, config } = await clientFor(companyId);
+      const key = issueKeyFromInput(query, config.siteHost);
+      // Clé complète ou URL : le ticket exact en tête, s'il existe.
+      const exact = key
+        ? await client.getIssue(key).catch((err: unknown) => {
+            if (err instanceof JiraError && err.kind === "not_found") return null;
+            throw err;
+          })
+        : null;
+      if (exact && /^https?:\/\//i.test(query)) return { recent: false, results: [exact] };
+      const suggested = await client.suggest(query);
+      const results = exact ? [exact, ...suggested.filter((i) => i.key !== exact.key)] : suggested;
+      return { recent: query === "", results: results.slice(0, 8) };
+    });
+
     // ── Préparer un lien : valide le ticket et calcule le nouveau document ─
     context.actions.register("prepare-link", async (params, actionContext): Promise<LinkDocumentChange> => {
       const companyId = actionContext.companyId ?? requireString(params, "companyId");
