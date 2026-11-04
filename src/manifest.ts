@@ -9,7 +9,7 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.3.0",
+  version: "0.3.1",
   displayName: "Jira link",
   description:
     "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
@@ -111,10 +111,13 @@ const manifest: PaperclipPluginManifestV1 = {
     launchers: [
       {
         // Barre du haut : visible quel que soit le mode d'affichage des tâches.
+        // Modale centrée et non popover : l'hôte (2026.1023) place un popover à
+        // `left ≤ largeur fenêtre − 360px` quelle que soit sa largeur réelle
+        // (40rem en `default`), ce qui le fait déborder à droite de l'écran.
         id: "jira-global",
         displayName: "Jira",
         placementZone: "globalToolbarButton",
-        action: { type: "openPopover", target: "JiraGlobalLauncher" },
+        action: { type: "openModal", target: "JiraGlobalLauncher" },
         render: { environment: "hostOverlay", bounds: "default" },
       },
       {
