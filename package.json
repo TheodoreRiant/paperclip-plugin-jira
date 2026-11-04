@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-jira",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Plugin Paperclip : lie une tâche à un ticket Jira Cloud et affiche son statut.",
   "license": "MIT",
   "author": "Théodore Riant",
@@ -26,13 +26,16 @@
     "node": ">=24.11.0"
   },
   "dependencies": {
-    "@paperclipai/plugin-sdk": "2026.1023.0"
+    "@paperclipai/plugin-sdk": "2026.1023.0",
+    "lucide-react": "^1.68.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.3.0",
     "esbuild": "^0.25.0",
     "react": "^19.2.0",
+    "react-dom": "^19.3.1",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   },

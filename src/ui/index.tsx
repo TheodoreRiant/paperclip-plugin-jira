@@ -1,26 +1,18 @@
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { RefreshCw, Ticket, TriangleAlert, Unlink, UserRound } from "lucide-react";
 import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode,
-} from "react";
-import {
+  DataTable,
   Spinner,
-  StatusBadge,
   useHostContext,
   useHostLocation,
   useHostNavigation,
   usePluginAction,
   usePluginData,
   usePluginToast,
+  type DataTableColumn,
   type PluginDetailTabProps,
   type PluginPageProps,
   type PluginSidebarProps,
-  type StatusBadgeVariant,
 } from "@paperclipai/plugin-sdk/ui";
 import type { ImportedTaskDraft, IssueLinksData, LinkDocumentChange, TicketView, TicketsData } from "../worker.js";
 import {
@@ -32,6 +24,28 @@ import {
   type OverviewRow,
   type TaskLite,
 } from "../overview.js";
+import {
+  Button,
+  COMMAND_ITEM_CLASS,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandList,
+  CommandRoot,
+  CommandShortcut,
+  ErrorNotice,
+  ExternalKey,
+  FilterChip,
+  Muted,
+  SectionHeader,
+  TaskStatusGlyph,
+  TicketStatus,
+  asExternalCategory,
+  buttonClass,
+  categoryFromJira,
+  cn,
+  taskStatusLabel,
+} from "./primitives.js";
 
 type JiraIssue = NonNullable<TicketView["issue"]>;
 
@@ -117,187 +131,62 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
-// ── Styles (variables CSS de l'hôte, valeurs de repli neutres) ──────────
+// ── Libellés ────────────────────────────────────────────────────────────
 
-const border = "1px solid var(--border, rgba(127,127,127,0.25))";
-const styles = {
-  stack: { display: "flex", flexDirection: "column", gap: 12 } as CSSProperties,
-  row: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } as CSSProperties,
-  card: { border, borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 4 } as CSSProperties,
-  muted: { opacity: 0.7, fontSize: 13 } as CSSProperties,
-  error: { color: "var(--destructive, #c0392b)", fontSize: 13 } as CSSProperties,
-  input: {
-    flex: 1,
-    minWidth: 200,
-    padding: "6px 8px",
-    borderRadius: 6,
-    border,
-    background: "transparent",
-    color: "inherit",
-  } as CSSProperties,
-  button: { padding: "6px 10px", borderRadius: 6, border, background: "transparent", color: "inherit", cursor: "pointer" } as CSSProperties,
-  primary: {
-    padding: "6px 10px",
-    borderRadius: 6,
-    border: "1px solid transparent",
-    background: "var(--primary, #2563eb)",
-    color: "var(--primary-foreground, #fff)",
-    cursor: "pointer",
-  } as CSSProperties,
-  heading: { fontSize: 13, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4, opacity: 0.75 } as CSSProperties,
-  chip: (active: boolean): CSSProperties => ({
-    padding: "4px 10px",
-    borderRadius: 999,
-    border,
-    background: active ? "var(--accent, rgba(127,127,127,0.18))" : "transparent",
-    color: "inherit",
-    cursor: "pointer",
-    fontWeight: active ? 600 : 400,
-  }),
-  table: { width: "100%", borderCollapse: "collapse", fontSize: 14 } as CSSProperties,
-  th: { textAlign: "left", padding: "6px 8px", borderBottom: border, fontWeight: 600, opacity: 0.75, fontSize: 12 } as CSSProperties,
-  td: { padding: "8px", borderBottom: border, verticalAlign: "top" } as CSSProperties,
+/** Libellé d'une catégorie de l'hôte, quand Jira n'a pas encore été relu. */
+const HOST_CATEGORY_LABELS: Record<string, string> = {
+  open: "À faire",
+  waiting: "À faire",
+  running: "En cours",
+  closed: "Terminé",
+  succeeded: "Terminé",
+  auth_required: "Accès Jira refusé",
+  unreachable: "Jira injoignable",
 };
-
-function badgeVariant(categoryKey: string | undefined): StatusBadgeVariant {
-  switch (categoryKey) {
-    case "done":
-      return "ok";
-    case "indeterminate":
-      return "info";
-    case "new":
-      return "pending";
-    default:
-      return "warning";
-  }
-}
-
-/** Catégorie normalisée de l'hôte (quand Jira n'a pas encore été relu). */
-function hostCategoryBadge(category: string): { label: string; status: StatusBadgeVariant } {
-  switch (category) {
-    case "closed":
-    case "succeeded":
-      return { label: "Terminé", status: "ok" };
-    case "running":
-      return { label: "En cours", status: "info" };
-    case "open":
-    case "waiting":
-      return { label: "À faire", status: "pending" };
-    case "auth_required":
-      return { label: "Accès Jira refusé", status: "error" };
-    case "unreachable":
-      return { label: "Jira injoignable", status: "warning" };
-    default:
-      return { label: "Inconnu", status: "warning" };
-  }
-}
-
-const TASK_STATUS_LABELS: Record<string, string> = {
-  backlog: "Backlog",
-  todo: "À faire",
-  in_progress: "En cours",
-  in_review: "En revue",
-  blocked: "Bloquée",
-  done: "Terminée",
-  cancelled: "Annulée",
-};
-
-function taskBadge(status: string): { label: string; status: StatusBadgeVariant } {
-  const label = TASK_STATUS_LABELS[status] ?? status;
-  if (status === "done") return { label, status: "ok" };
-  if (status === "cancelled" || status === "backlog") return { label, status: "pending" };
-  if (status === "blocked") return { label, status: "error" };
-  return { label, status: "info" };
-}
 
 const GAP_LABELS: Record<GapKind, string> = {
   ticket_done_task_open: "Ticket terminé, tâche encore ouverte",
   task_done_ticket_open: "Tâche terminée, ticket encore ouvert",
 };
 
-// ── Briques communes ────────────────────────────────────────────────────
+function JiraIssueStatus({ issue }: { issue: JiraIssue }) {
+  return <TicketStatus category={categoryFromJira(issue.statusCategoryKey)} label={issue.statusName} />;
+}
 
-function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+function Loading({ label }: { label: string }) {
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.4)",
-        display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "center",
-        paddingTop: "10vh",
-        zIndex: 1000,
-      }}
-    >
-      <div
-        style={{
-          background: "var(--background, #fff)",
-          color: "var(--foreground, inherit)",
-          border,
-          borderRadius: 10,
-          padding: 16,
-          width: wide ? "min(720px, 94vw)" : "min(560px, 92vw)",
-          maxHeight: "80vh",
-          overflowY: "auto",
-          ...styles.stack,
-        }}
-      >
-        <div style={styles.row}>
-          <strong>{title}</strong>
-          <button type="button" style={{ ...styles.button, marginLeft: "auto" }} onClick={onClose}>
-            Fermer
-          </button>
-        </div>
-        {children}
-      </div>
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Spinner label={label} />
+      {label}
     </div>
   );
 }
 
-function TicketCard({ view, onUnlink, busy }: { view: TicketView; onUnlink?: () => void; busy?: boolean }) {
+// ── Ticket lié ──────────────────────────────────────────────────────────
+
+function TicketRow({ view, onUnlink, busy }: { view: TicketView; onUnlink?: () => void; busy?: boolean }) {
   const issue = view.issue;
+  const meta = issue
+    ? [issue.issueType, issue.priority && `Priorité ${issue.priority}`, `Assigné : ${issue.assignee ?? "personne"}`].filter(Boolean).join(" · ")
+    : null;
   return (
-    <div style={styles.card}>
-      <div style={styles.row}>
-        <a href={view.url} target="_blank" rel="noreferrer noopener">
-          <strong>{view.key}</strong>
-        </a>
-        {issue ? (
-          <StatusBadge label={issue.statusName} status={badgeVariant(issue.statusCategoryKey)} />
-        ) : (
-          <StatusBadge label={view.error ?? "Introuvable"} status="warning" />
-        )}
+    <div className="flex flex-col gap-1 rounded-md border border-border px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <ExternalKey href={view.url}>{view.key}</ExternalKey>
+        <span className="min-w-0 flex-1 truncate text-sm">{issue?.summary ?? ""}</span>
+        {issue ? <JiraIssueStatus issue={issue} /> : <TicketStatus category="unknown" label={view.error ?? "Introuvable"} />}
         {onUnlink ? (
-          <button type="button" style={{ ...styles.button, marginLeft: "auto" }} onClick={onUnlink} disabled={busy}>
-            Délier
-          </button>
+          <Button variant="ghost" size="icon-xs" onClick={onUnlink} disabled={busy} title="Délier" aria-label={`Délier ${view.key}`}>
+            {busy ? <Spinner label="Délien…" /> : <Unlink aria-hidden="true" />}
+          </Button>
         ) : null}
       </div>
-      {issue ? (
-        <>
-          <div>{issue.summary}</div>
-          <div style={styles.muted}>
-            {[issue.issueType, issue.priority && `Priorité ${issue.priority}`, `Assigné : ${issue.assignee ?? "personne"}`]
-              .filter(Boolean)
-              .join(" · ")}
-          </div>
-        </>
-      ) : null}
+      {meta ? <p className="text-xs text-muted-foreground">{meta}</p> : null}
     </div>
   );
 }
+
+// ── Recherche en direct (présentation `Command` de l'hôte) ──────────────
 
 function looksLikeKeyOrUrl(value: string): boolean {
   return /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(value) || /^https?:\/\//i.test(value);
@@ -416,13 +305,13 @@ function TicketSearchBox({
     }
   }
 
-  const showList = open && (focused || busyKey !== null);
+  const showList = open && (focused || busyKey !== null) && response !== null;
 
   return (
-    <div style={styles.stack}>
-      <div style={{ ...styles.row, flexWrap: "nowrap" }}>
-        <input
-          style={styles.input}
+    <div className="flex flex-col gap-2">
+      <CommandRoot className="border">
+        <CommandInput
+          divider={showList}
           value={input}
           onChange={(e) => {
             setInput(e.target.value);
@@ -434,59 +323,56 @@ function TicketSearchBox({
           }}
           onBlur={() => setFocused(false)}
           onKeyDown={onKeyDown}
-          placeholder="Tapez une clé (ABC-12…), quelques mots ou collez une URL"
+          placeholder="Clé (ABC-12…), quelques mots ou URL du ticket"
           aria-label={ariaLabel}
           aria-autocomplete="list"
           aria-expanded={showList}
           role="combobox"
           disabled={disabled}
           autoFocus={autoFocus}
+          trailing={loading ? <Spinner label="Recherche…" /> : null}
         />
-        <span style={{ width: 16, display: "inline-flex" }}>{loading ? <Spinner size="sm" /> : null}</span>
-      </div>
-      {error ? <div style={styles.error}>{error}</div> : null}
-      {showList && response ? (
-        <div role="listbox" aria-label={ariaLabel} style={{ ...styles.stack, gap: 2 }}>
-          {response.recent && results.length > 0 ? <div style={styles.muted}>Consultés récemment dans Jira</div> : null}
-          {results.length === 0 && !loading ? (
-            <div style={styles.muted}>{query ? "Aucun ticket ne correspond." : "Commencez à taper pour chercher un ticket."}</div>
-          ) : null}
-          {results.map((issue, index) => (
-            <div
-              key={issue.key}
-              role="option"
-              aria-selected={index === highlight}
-              // mousedown : choisir avant que le champ ne perde le focus.
-              onMouseDown={(e) => {
-                e.preventDefault();
-                if (!disabled) void pick(issue.key);
-              }}
-              onMouseEnter={() => setHighlight(index)}
-              style={{
-                ...styles.row,
-                flexWrap: "nowrap",
-                padding: "6px 8px",
-                borderRadius: 6,
-                cursor: disabled ? "default" : "pointer",
-                background: index === highlight ? "var(--accent, rgba(127,127,127,0.15))" : "transparent",
-              }}
-            >
-              <strong style={{ whiteSpace: "nowrap" }}>{issue.key}</strong>
-              <StatusBadge label={issue.statusName} status={badgeVariant(issue.statusCategoryKey)} />
-              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {issue.summary}
-              </span>
-              {aside?.(issue)}
-              <span style={{ ...styles.muted, whiteSpace: "nowrap" }}>
-                {busyKey === issue.key ? "…" : index === highlight ? `${actionLabel(issue)} ↵` : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
+        {showList ? (
+          <CommandList label={ariaLabel}>
+            {results.length === 0 ? (
+              loading ? null : (
+                <CommandEmpty>{query ? "Aucun ticket ne correspond." : "Commencez à taper pour chercher un ticket."}</CommandEmpty>
+              )
+            ) : (
+              <CommandGroup heading={response.recent ? "Consultés récemment dans Jira" : "Suggestions"}>
+                {results.map((issue, index) => (
+                  <div
+                    key={issue.key}
+                    role="option"
+                    aria-selected={index === highlight}
+                    data-selected={index === highlight}
+                    data-disabled={disabled}
+                    className={COMMAND_ITEM_CLASS}
+                    // mousedown : choisir avant que le champ ne perde le focus.
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      if (!disabled) void pick(issue.key);
+                    }}
+                    onMouseEnter={() => setHighlight(index)}
+                  >
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">{issue.key}</span>
+                    <span className="min-w-0 flex-1 truncate">{issue.summary}</span>
+                    {aside?.(issue)}
+                    <JiraIssueStatus issue={issue} />
+                    <CommandShortcut>{busyKey === issue.key ? "…" : index === highlight ? `${actionLabel(issue)} ↵` : ""}</CommandShortcut>
+                  </div>
+                ))}
+              </CommandGroup>
+            )}
+          </CommandList>
+        ) : null}
+      </CommandRoot>
+      {error ? <ErrorNotice>{error}</ErrorNotice> : null}
     </div>
   );
 }
+
+// ── Tickets d'une tâche ─────────────────────────────────────────────────
 
 function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId: string; onLinked: () => void }) {
   const prepareLink = usePluginAction("prepare-link");
@@ -516,7 +402,7 @@ function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId
   }
 
   return (
-    <div style={styles.stack}>
+    <div className="flex flex-col gap-2">
       <TicketSearchBox
         companyId={companyId}
         ariaLabel="Ticket Jira à lier"
@@ -526,26 +412,26 @@ function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId
         autoFocus
         onPick={link}
       />
-      {error ? <div style={styles.error}>{error}</div> : null}
+      {error ? <ErrorNotice>{error}</ErrorNotice> : null}
     </div>
   );
 }
 
 function NotConfigured({ errors }: { errors: string[] }) {
   return (
-    <div style={styles.stack}>
-      <strong>Plugin Jira non configuré</strong>
-      <ul>
+    <div className="flex flex-col gap-2 rounded-md border border-border px-3 py-2 text-sm">
+      <p className="font-medium">Plugin Jira non configuré</p>
+      <ul className="list-disc pl-5 text-muted-foreground">
         {errors.map((e) => (
           <li key={e}>{e}</li>
         ))}
       </ul>
-      <div style={styles.muted}>Réglages → Plugins → Jira link.</div>
+      <Muted>Réglages → Plugins → Jira link.</Muted>
     </div>
   );
 }
 
-/** Tickets liés à une tâche + formulaire de liaison. Utilisé par l'onglet et par le bouton du haut. */
+/** Tickets liés à une tâche + formulaire de liaison. Utilisé par l'onglet et par les boutons Jira. */
 function IssueJiraPanel({ companyId, issueId }: { companyId: string; issueId: string }) {
   const { data, loading, error, refresh } = usePluginData<IssueLinksData>("issue-links", { companyId, issueId });
   const prepareUnlink = usePluginAction("prepare-unlink");
@@ -566,32 +452,35 @@ function IssueJiraPanel({ companyId, issueId }: { companyId: string; issueId: st
     }
   }
 
-  if (loading && !data) return <Spinner label="Lecture de Jira…" />;
-  if (error) return <div style={styles.error}>Erreur : {error.message}</div>;
+  if (loading && !data) return <Loading label="Lecture de Jira…" />;
+  if (error) return <ErrorNotice>{error.message}</ErrorNotice>;
   if (!data) return null;
   if (!data.configured) return <NotConfigured errors={data.configErrors} />;
 
   return (
-    <div style={styles.stack}>
-      <div style={styles.heading}>Tickets liés</div>
-      {data.linked.length === 0 && data.mentioned.length === 0 ? (
-        <div style={styles.muted}>Aucun ticket lié pour l'instant.</div>
-      ) : (
-        data.linked.map((view) => (
-          <TicketCard key={view.key} view={view} busy={busyKey === view.key} onUnlink={() => unlink(view.key)} />
-        ))
-      )}
+    <div className="flex flex-col gap-4">
+      <section className="flex flex-col gap-2">
+        <SectionHeader>Tickets liés</SectionHeader>
+        {data.linked.length === 0 && data.mentioned.length === 0 ? (
+          <Muted>Aucun ticket lié pour l'instant.</Muted>
+        ) : (
+          data.linked.map((view) => (
+            <TicketRow key={view.key} view={view} busy={busyKey === view.key} onUnlink={() => unlink(view.key)} />
+          ))
+        )}
+      </section>
       {data.mentioned.length > 0 ? (
-        <>
-          {data.linked.length > 0 ? <div style={styles.heading}>Cités dans la tâche</div> : null}
+        <section className="flex flex-col gap-2">
+          <SectionHeader>Cités dans la tâche</SectionHeader>
           {data.mentioned.map((view) => (
-            <TicketCard key={view.key} view={view} />
+            <TicketRow key={view.key} view={view} />
           ))}
-        </>
+        </section>
       ) : null}
-
-      <div style={styles.heading}>Lier un ticket</div>
-      <LinkForm companyId={companyId} issueId={issueId} onLinked={refresh} />
+      <section className="flex flex-col gap-2">
+        <SectionHeader>Lier un ticket</SectionHeader>
+        <LinkForm companyId={companyId} issueId={issueId} onLinked={refresh} />
+      </section>
     </div>
   );
 }
@@ -614,12 +503,13 @@ function ImportForm({
   const navigation = useHostNavigation();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<{ title: string; issues: JiraIssue[] } | null>(null);
+  const [results, setResults] = useState<JiraIssue[] | null>(null);
 
+  const linkedTasks = (issue: JiraIssue) => existing?.get(issue.key) ?? [];
   const alreadyLinked = (issue: JiraIssue) => {
-    const tasks = existing?.get(issue.key) ?? [];
+    const tasks = linkedTasks(issue);
     return tasks.length === 0 ? null : (
-      <span style={{ ...styles.muted, whiteSpace: "nowrap" }}>Déjà lié : {tasks.map((t) => t.identifier ?? t.title).join(", ")}</span>
+      <span className="shrink-0 text-xs text-muted-foreground">Déjà lié : {tasks.map((t) => t.identifier ?? t.title).join(", ")}</span>
     );
   };
 
@@ -651,7 +541,7 @@ function ImportForm({
     setError(null);
     try {
       const response = (await myTickets({ companyId })) as { results: JiraIssue[] };
-      setResults({ title: "Mes tickets assignés (non terminés)", issues: response.results });
+      setResults(response.results);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -660,93 +550,88 @@ function ImportForm({
   }
 
   return (
-    <div style={styles.stack}>
-      <div style={{ ...styles.row, alignItems: "flex-start", flexWrap: "nowrap" }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
           <TicketSearchBox
             companyId={companyId}
             ariaLabel="Ticket Jira à importer"
-            actionLabel={(issue) => ((existing?.get(issue.key)?.length ?? 0) > 0 ? "Créer quand même" : "Créer la tâche")}
+            actionLabel={(issue) => (linkedTasks(issue).length > 0 ? "Créer quand même" : "Créer la tâche")}
             busyKey={busy}
             disabled={busy !== null}
             aside={alreadyLinked}
             onPick={create}
           />
         </div>
-        <button type="button" style={{ ...styles.button, whiteSpace: "nowrap" }} onClick={listMine} disabled={busy !== null}>
-          {busy === "mine" ? "…" : "Mes tickets assignés"}
-        </button>
+        <Button variant="outline" size="sm" onClick={listMine} disabled={busy !== null}>
+          {busy === "mine" ? <Spinner label="Lecture de Jira…" /> : <UserRound aria-hidden="true" />}
+          Mes tickets assignés
+        </Button>
       </div>
-      {error ? <div style={styles.error}>{error}</div> : null}
+      {error ? <ErrorNotice>{error}</ErrorNotice> : null}
       {results ? (
-        <div style={styles.stack}>
-          <div style={styles.muted}>{results.title}</div>
-          {results.issues.length === 0 ? (
-            <div style={styles.muted}>Aucun ticket.</div>
+        <section className="flex flex-col gap-2">
+          <SectionHeader>Mes tickets assignés (non terminés)</SectionHeader>
+          {results.length === 0 ? (
+            <Muted>Aucun ticket.</Muted>
           ) : (
-            results.issues.map((issue) => {
-              const already = existing?.get(issue.key) ?? [];
+            results.map((issue) => {
+              const already = linkedTasks(issue);
               return (
-                <div key={issue.key} style={{ ...styles.row, ...styles.card, flexDirection: "row" }}>
-                  <a href={issue.url} target="_blank" rel="noreferrer noopener">
-                    <strong>{issue.key}</strong>
-                  </a>
-                  <StatusBadge label={issue.statusName} status={badgeVariant(issue.statusCategoryKey)} />
-                  <span style={{ flex: 1, minWidth: 160 }}>{issue.summary}</span>
+                <div key={issue.key} className="flex min-w-0 items-center gap-2 rounded-md border border-border px-3 py-2">
+                  <ExternalKey href={issue.url}>{issue.key}</ExternalKey>
+                  <span className="min-w-0 flex-1 truncate text-sm">{issue.summary}</span>
                   {already.length > 0 ? (
-                    <span style={styles.muted}>
+                    <span className="shrink-0 text-xs text-muted-foreground">
                       Déjà lié :{" "}
                       {already.map((t, i) => (
                         <span key={t.id}>
                           {i > 0 ? ", " : ""}
-                          <a {...navigation.linkProps(`/issues/${t.identifier ?? t.id}`)}>{t.identifier ?? t.title}</a>
+                          <a {...navigation.linkProps(`/issues/${t.identifier ?? t.id}`)} className="hover:text-foreground hover:underline">
+                            {t.identifier ?? t.title}
+                          </a>
                         </span>
                       ))}
                     </span>
                   ) : null}
-                  <button
-                    type="button"
-                    style={already.length > 0 ? styles.button : styles.primary}
-                    onClick={() => create(issue.key)}
+                  <JiraIssueStatus issue={issue} />
+                  <Button
+                    variant={already.length > 0 ? "outline" : "default"}
+                    size="xs"
+                    onClick={() => void create(issue.key)}
                     disabled={busy !== null}
                   >
                     {busy === issue.key ? "…" : already.length > 0 ? "Créer quand même" : "Créer la tâche"}
-                  </button>
+                  </Button>
                 </div>
               );
             })
           )}
-        </div>
+        </section>
       ) : null}
     </div>
   );
 }
 
-// ── Mode classique : onglet et bouton de la page tâche ──────────────────
+// ── Page tâche (mode classique) : onglet ────────────────────────────────
 
 export function JiraTab({ context }: PluginDetailTabProps) {
   return <IssueJiraPanel companyId={context.companyId ?? ""} issueId={context.entityId} />;
 }
 
-/** Bouton de barre d'outils de la page tâche (mode classique). */
-export function JiraToolbarButton({ context }: PluginDetailTabProps) {
-  const [open, setOpen] = useState(false);
-  const close = useCallback(() => setOpen(false), []);
-  return (
-    <>
-      <button type="button" style={styles.button} onClick={() => setOpen(true)}>
-        Lier à Jira
-      </button>
-      {open ? (
-        <Modal title="Jira" onClose={close}>
-          <IssueJiraPanel companyId={context.companyId ?? ""} issueId={context.entityId} />
-        </Modal>
-      ) : null}
-    </>
-  );
-}
+// ── Fenêtres ouvertes par les boutons « Jira » ──────────────────────────
+//
+// Les boutons sont des « launchers » déclarés dans le manifeste : Paperclip
+// dessine lui-même le bouton (comme ses autres boutons de barre d'outils) et
+// la fenêtre (en-tête, bouton Close, Échap, clic à côté). Le plugin ne fournit
+// que le contenu.
 
-// ── Barre du haut : visible partout, quel que soit le mode ──────────────
+/** Bouton « Jira » de la page d'une tâche (mode classique). */
+export function JiraIssueLauncher() {
+  const host = useHostContext();
+  if (!host.companyId || !host.entityId) return <Muted>Ouvrez une tâche pour gérer ses tickets Jira.</Muted>;
+  return <IssueJiraPanel companyId={host.companyId} issueId={host.entityId} />;
+}
 
 interface ResolvedTask {
   id: string;
@@ -754,39 +639,23 @@ interface ResolvedTask {
   title: string;
 }
 
-function JiraLogo({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ flexShrink: 0 }}>
-      <path
-        fill="currentColor"
-        d="M11.53 2 3.3 10.23a1.1 1.1 0 0 0 0 1.54L11.53 20l2.4-2.4-6.6-6.6 6.6-6.6zm.94 4.4L10.07 8.8l3.2 3.2-3.2 3.2 2.4 2.4 5.6-5.6z"
-      />
-    </svg>
-  );
-}
-
 /**
- * Bouton « Jira » de la barre du haut. L'hôte ne transmet à cet emplacement
- * que la société : la tâche ouverte est lue dans l'URL (`/<préfixe>/issues/<ID>`).
- * Sur une tâche : tickets liés, lier, délier. Ailleurs : créer une tâche
- * depuis un ticket, et accès à la page Jira.
+ * Bouton « Jira » de la barre du haut, visible quel que soit le mode. L'hôte
+ * ne transmet à cet emplacement que la société : la tâche ouverte est lue dans
+ * l'URL (`/<préfixe>/issues/<ID>`). Sur une tâche : tickets liés, lier,
+ * délier. Ailleurs : créer une tâche depuis un ticket.
  */
-export function JiraGlobalButton() {
+export function JiraGlobalLauncher() {
   const host = useHostContext();
   const { pathname } = useHostLocation();
   const navigation = useHostNavigation();
   const companyId = host.companyId ?? "";
   const taskRef = taskRefFromPath(pathname);
-  const [open, setOpen] = useState(false);
   const [task, setTask] = useState<ResolvedTask | null>(null);
   const [taskError, setTaskError] = useState<string | null>(null);
-  const close = useCallback(() => setOpen(false), []);
-
-  // On ferme la fenêtre quand on change de page.
-  useEffect(() => setOpen(false), [pathname]);
 
   useEffect(() => {
-    if (!open || !taskRef) return;
+    if (!taskRef) return;
     let cancelled = false;
     setTask(null);
     setTaskError(null);
@@ -796,47 +665,42 @@ export function JiraGlobalButton() {
     return () => {
       cancelled = true;
     };
-  }, [open, taskRef]);
+  }, [taskRef]);
 
-  if (!companyId) return null;
+  if (!companyId) return <Muted>Choisissez une société.</Muted>;
 
   return (
-    <>
-      <button
-        type="button"
-        style={{ ...styles.button, display: "inline-flex", alignItems: "center", gap: 6, height: 32, padding: "0 10px" }}
-        onClick={() => setOpen(true)}
-        title={taskRef ? `Tickets Jira de ${taskRef}` : "Jira"}
-      >
-        <JiraLogo />
-        Jira
-      </button>
-      {open ? (
-        <Modal title={taskRef ? `Jira — ${taskRef}` : "Jira"} onClose={close} wide={!taskRef}>
-          {taskRef ? (
-            taskError ? (
-              <div style={styles.error}>Tâche introuvable : {taskError}</div>
-            ) : task ? (
-              <IssueJiraPanel companyId={companyId} issueId={task.id} />
-            ) : (
-              <Spinner label="Chargement de la tâche…" />
-            )
-          ) : (
-            <>
-              <div style={styles.heading}>Créer une tâche depuis un ticket</div>
-              <ImportForm companyId={companyId} onCreated={close} />
-            </>
-          )}
-          <div style={{ ...styles.row, justifyContent: "flex-end" }}>
-            <a {...navigation.linkProps(`/${JIRA_ROUTE}`)}>Ouvrir la page Jira →</a>
-          </div>
-        </Modal>
-      ) : null}
-    </>
+    <div className="flex flex-col gap-4">
+      {taskRef ? (
+        taskError ? (
+          <ErrorNotice>Tâche introuvable : {taskError}</ErrorNotice>
+        ) : task ? (
+          <>
+            <p className="flex min-w-0 items-center gap-2 text-sm">
+              <span className="shrink-0 font-mono text-xs text-muted-foreground">{task.identifier ?? taskRef}</span>
+              <span className="truncate">{task.title}</span>
+            </p>
+            <IssueJiraPanel companyId={companyId} issueId={task.id} />
+          </>
+        ) : (
+          <Loading label="Chargement de la tâche…" />
+        )
+      ) : (
+        <section className="flex flex-col gap-2">
+          <SectionHeader>Créer une tâche depuis un ticket</SectionHeader>
+          <ImportForm companyId={companyId} />
+        </section>
+      )}
+      <div className="flex justify-end border-t border-border pt-3">
+        <a {...navigation.linkProps(`/${JIRA_ROUTE}`)} className={buttonClass("ghost", "xs")}>
+          Ouvrir la page Jira
+        </a>
+      </div>
+    </div>
   );
 }
 
-// ── Barre latérale ──────────────────────────────────────────────────────
+// ── Barre latérale (même rendu que les entrées natives) ─────────────────
 
 export function JiraSidebarLink(_props: PluginSidebarProps) {
   const navigation = useHostNavigation();
@@ -846,21 +710,17 @@ export function JiraSidebarLink(_props: PluginSidebarProps) {
     <a
       {...navigation.linkProps(`/${JIRA_ROUTE}`)}
       aria-current={active ? "page" : undefined}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        height: 32,
-        padding: "0 12px",
-        borderRadius: 6,
-        color: "inherit",
-        textDecoration: "none",
-        fontWeight: active ? 600 : 500,
-        background: active ? "var(--accent, rgba(127,127,127,0.15))" : "transparent",
-      }}
+      className={cn(
+        "flex items-center gap-2.5 mx-2 rounded-lg px-2 py-1.5 pointer-coarse:py-1 text-(length:--text-compact) font-medium transition-colors",
+        active
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+      )}
     >
-      <JiraLogo size={16} />
-      Jira
+      <span data-slot="sidebar-nav-icon" className="relative shrink-0">
+        <Ticket className="h-4 w-4" aria-hidden="true" />
+      </span>
+      <span className="flex-1 truncate">Jira</span>
     </a>
   );
 }
@@ -886,6 +746,23 @@ async function loadOverview(companyId: string): Promise<OverviewState> {
     { method: "POST", body: JSON.stringify({ issueIds: tasks.map((t) => t.id) }) },
   );
   return { rows: buildOverview(tasks, summaries), taskCount: tasks.length };
+}
+
+interface TableRow {
+  id: string;
+  ticket: OverviewRow;
+  task: OverviewRow;
+  gap: OverviewRow;
+  [key: string]: unknown;
+}
+
+function GapNotice({ gap }: { gap: GapKind }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+      <TriangleAlert aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <span>{GAP_LABELS[gap]}</span>
+    </span>
+  );
 }
 
 export function JiraPage({ context }: PluginPageProps) {
@@ -918,112 +795,118 @@ export function JiraPage({ context }: PluginPageProps) {
   const activeFilter: Filter = filter ?? (gaps.length > 0 ? "gaps" : "open");
   const visible = activeFilter === "gaps" ? gaps : activeFilter === "open" ? openRows : (overview?.rows ?? []);
 
-  if (!companyId) return <div style={styles.muted}>Choisissez une société.</div>;
+  if (!companyId) return <Muted>Choisissez une société.</Muted>;
   if (tickets.data && !tickets.data.configured) return <NotConfigured errors={tickets.data.configErrors} />;
 
-  return (
-    <div style={{ ...styles.stack, gap: 20, padding: "16px 24px", maxWidth: 1200 }}>
-      <div style={styles.row}>
-        <JiraLogo size={20} />
-        <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Jira</h1>
-        <button
-          type="button"
-          style={{ ...styles.button, marginLeft: "auto" }}
-          onClick={() => {
-            setReloadToken((n) => n + 1);
-            tickets.refresh();
-          }}
-        >
-          Actualiser
-        </button>
-      </div>
+  const columns: DataTableColumn<TableRow>[] = [
+    {
+      key: "ticket",
+      header: "Ticket Jira",
+      width: "minmax(0, 1.2fr)",
+      render: (_value, { ticket: row }) => {
+        const live = tickets.data?.tickets[row.key];
+        const url = live?.url ?? (tickets.data?.siteUrl ? `${tickets.data.siteUrl}/browse/${row.key}` : undefined);
+        const summary = live?.issue?.summary ?? row.ticketTitle ?? "";
+        return (
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <ExternalKey href={url}>{row.key}</ExternalKey>
+              {live?.issue ? (
+                <JiraIssueStatus issue={live.issue} />
+              ) : (
+                <TicketStatus
+                  category={asExternalCategory(row.ticketCategory)}
+                  label={HOST_CATEGORY_LABELS[row.ticketCategory] ?? "Inconnu"}
+                />
+              )}
+            </div>
+            <span className="truncate text-sm" title={summary}>
+              {summary}
+            </span>
+            {live?.issue?.assignee ? <span className="text-xs text-muted-foreground">{live.issue.assignee}</span> : null}
+          </div>
+        );
+      },
+    },
+    {
+      key: "task",
+      header: "Tâche Paperclip",
+      width: "minmax(0, 1fr)",
+      render: (_value, { task: row }) => (
+        <div className="flex min-w-0 items-center gap-2">
+          <TaskStatusGlyph status={row.task.status} />
+          <a
+            {...navigation.linkProps(`/issues/${row.task.identifier ?? row.task.id}`)}
+            className="shrink-0 font-mono text-xs text-muted-foreground hover:text-foreground hover:underline"
+          >
+            {row.task.identifier ?? "Tâche"}
+          </a>
+          <span className="min-w-0 truncate text-sm" title={`${row.task.title} — ${taskStatusLabel(row.task.status)}`}>
+            {row.task.title}
+          </span>
+        </div>
+      ),
+    },
+    {
+      key: "gap",
+      header: "Écart",
+      width: "minmax(0, 0.8fr)",
+      render: (_value, { gap: row }) => (row.gap ? <GapNotice gap={row.gap} /> : <span className="text-xs text-muted-foreground">—</span>),
+    },
+  ];
 
-      <section style={styles.stack}>
-        <div style={styles.heading}>Créer une tâche depuis un ticket</div>
+  const tableRows: TableRow[] = visible.map((row) => ({ id: `${row.task.id}:${row.key}`, ticket: row, task: row, gap: row }));
+
+  const emptyMessage =
+    activeFilter === "gaps"
+      ? "Aucun écart : les statuts des tâches et des tickets concordent."
+      : overview?.rows.length === 0
+        ? "Aucune tâche n'est encore liée à un ticket Jira. Collez l'URL d'un ticket dans une tâche, utilisez le bouton « Jira » en haut, ou créez une tâche ci-dessus."
+        : "Aucune tâche dans ce filtre.";
+
+  return (
+    <div className="flex max-w-6xl flex-col gap-6">
+      <section className="flex flex-col gap-3">
+        <SectionHeader>Créer une tâche depuis un ticket</SectionHeader>
         <ImportForm companyId={companyId} existing={existing} onCreated={() => setReloadToken((n) => n + 1)} />
       </section>
 
-      <section style={styles.stack}>
-        <div style={styles.row}>
-          <div style={styles.heading}>Tâches liées à Jira</div>
-          <div style={{ ...styles.row, marginLeft: "auto" }}>
-            <button type="button" style={styles.chip(activeFilter === "gaps")} onClick={() => setFilter("gaps")}>
-              Écarts ({gaps.length})
-            </button>
-            <button type="button" style={styles.chip(activeFilter === "open")} onClick={() => setFilter("open")}>
-              Tâches ouvertes ({openRows.length})
-            </button>
-            <button type="button" style={styles.chip(activeFilter === "all")} onClick={() => setFilter("all")}>
-              Tout ({overview?.rows.length ?? 0})
-            </button>
-          </div>
+      <section className="flex flex-col gap-3">
+        <SectionHeader
+          trailing={
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => {
+                setReloadToken((n) => n + 1);
+                tickets.refresh();
+              }}
+            >
+              <RefreshCw aria-hidden="true" />
+              Actualiser
+            </Button>
+          }
+        >
+          Tâches liées à Jira
+        </SectionHeader>
+        <div className="flex flex-wrap gap-1.5">
+          <FilterChip active={activeFilter === "gaps"} onClick={() => setFilter("gaps")}>
+            Écarts ({gaps.length})
+          </FilterChip>
+          <FilterChip active={activeFilter === "open"} onClick={() => setFilter("open")}>
+            Tâches ouvertes ({openRows.length})
+          </FilterChip>
+          <FilterChip active={activeFilter === "all"} onClick={() => setFilter("all")}>
+            Tout ({overview?.rows.length ?? 0})
+          </FilterChip>
         </div>
 
-        {loadError ? <div style={styles.error}>{loadError}</div> : null}
-        {!overview && !loadError ? <Spinner label="Chargement des liens…" /> : null}
-        {overview && visible.length === 0 ? (
-          <div style={styles.muted}>
-            {activeFilter === "gaps"
-              ? "Aucun écart : les statuts des tâches et des tickets concordent."
-              : overview.rows.length === 0
-                ? "Aucune tâche n'est encore liée à un ticket Jira. Collez l'URL d'un ticket dans une tâche, utilisez le bouton « Jira » en haut, ou créez une tâche ci-dessus."
-                : "Aucune tâche dans ce filtre."}
-          </div>
-        ) : null}
-        {overview && visible.length > 0 ? (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Ticket Jira</th>
-                <th style={styles.th}>Tâche Paperclip</th>
-                <th style={styles.th}>Écart</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((row) => {
-                const live = tickets.data?.tickets[row.key];
-                const fallback = hostCategoryBadge(row.ticketCategory);
-                const tBadge = taskBadge(row.task.status);
-                const url = live?.url ?? (tickets.data?.siteUrl ? `${tickets.data.siteUrl}/browse/${row.key}` : undefined);
-                return (
-                  <tr key={`${row.task.id}:${row.key}`}>
-                    <td style={styles.td}>
-                      <div style={styles.row}>
-                        <a href={url} target="_blank" rel="noreferrer noopener">
-                          <strong>{row.key}</strong>
-                        </a>
-                        {live?.issue ? (
-                          <StatusBadge label={live.issue.statusName} status={badgeVariant(live.issue.statusCategoryKey)} />
-                        ) : (
-                          <StatusBadge label={fallback.label} status={fallback.status} />
-                        )}
-                      </div>
-                      <div style={styles.muted}>
-                        {live?.issue?.summary ?? row.ticketTitle ?? ""}
-                        {live?.issue?.assignee ? ` · ${live.issue.assignee}` : ""}
-                      </div>
-                    </td>
-                    <td style={styles.td}>
-                      <div style={styles.row}>
-                        <a {...navigation.linkProps(`/issues/${row.task.identifier ?? row.task.id}`)}>
-                          <strong>{row.task.identifier ?? "Tâche"}</strong>
-                        </a>
-                        <StatusBadge label={tBadge.label} status={tBadge.status} />
-                      </div>
-                      <div style={styles.muted}>{row.task.title}</div>
-                    </td>
-                    <td style={styles.td}>
-                      {row.gap ? <StatusBadge label={GAP_LABELS[row.gap]} status="warning" /> : <span style={styles.muted}>—</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        ) : null}
-        {overview && overview.taskCount >= 1000 ? (
-          <div style={styles.muted}>Seules les 1 000 tâches les plus récentes sont analysées.</div>
-        ) : null}
+        {loadError ? <ErrorNotice>{loadError}</ErrorNotice> : null}
+        {!loadError ? <DataTable
+            // `DataTable` n'est pas générique côté JSX : on élargit le type des lignes.
+            columns={columns as unknown as DataTableColumn[]}
+            rows={tableRows} loading={!overview} emptyMessage={emptyMessage} /> : null}
+        {overview && overview.taskCount >= 1000 ? <Muted>Seules les 1 000 tâches les plus récentes sont analysées.</Muted> : null}
       </section>
     </div>
   );

@@ -10,7 +10,7 @@ Plugin [Paperclip](https://github.com/paperclipai/paperclip) qui lie une tâche 
 | **Bouton « Jira » dans la barre du haut** | Toujours visible, quel que soit l'affichage des tâches (chat ou classique). Sur une tâche, il ouvre ses tickets liés : statut, résumé, assigné, bouton **Délier**, et un champ pour lier un ticket par clé (`ABC-123`), URL ou recherche texte. Ailleurs, il propose de créer une tâche depuis un ticket. |
 | **Page « Jira »** (barre latérale) | Toutes les tâches liées à un ticket, avec les deux statuts côte à côte. Le filtre **Écarts** fait ressortir un ticket terminé dont la tâche est encore ouverte, ou une tâche terminée dont le ticket est encore ouvert. Elle s'appuie sur les liens détectés par Paperclip : URL collée dans une tâche, un commentaire ou le document `jira`. |
 | **Créer une tâche depuis un ticket** | Depuis la page Jira ou le bouton du haut : une clé, une URL, une recherche, ou **Mes tickets assignés** (non terminés). La tâche est créée avec le titre `[ABC-123] résumé`, la description du ticket convertie en markdown et le lien en tête : la pastille de statut apparaît aussitôt. Un ticket déjà lié à une tâche est signalé avant de créer un doublon. |
-| **Mode classique** | L'onglet **Jira** et le bouton **« Lier à Jira »** de la page tâche restent disponibles quand l'interface classique des tâches est activée. |
+| **Mode classique** | L'onglet **Jira** et le bouton **« Jira »** de la page tâche restent disponibles quand l'interface classique des tâches est activée. |
 | **Outil agent `get_issue`** | Un agent lit un ticket par sa clé, ou tous les tickets d'une tâche par l'`issueId` de celle-ci. Il n'a besoin d'aucun accès direct à Jira. |
 | **Fraîcheur** | Le statut est mis en cache 5 min (1 h pour un ticket terminé) et considéré comme périmé après 30 min. Le rafraîchissement se fait par lot, avec une seule requête JQL `key in (...)` pour 50 tickets. |
 
@@ -100,9 +100,20 @@ src/
   adf.ts           description Jira (Atlassian Document Format) → markdown
   import.ts        titre et description d'une tâche créée depuis un ticket
   overview.ts      page Jira : rapprochement tâches ↔ tickets, écarts de statut
-  ui/index.tsx     bouton du haut, page et lien latéral, onglet et bouton classiques
+  ui/index.tsx     contenu des fenêtres Jira, page et lien latéral, onglet classique
+  ui/primitives.tsx  briques d'interface reprises de Paperclip (Button, Input, Command…)
 tests/
 ```
+
+## Interface
+
+L'interface suit le design system de Paperclip (shadcn/ui, Tailwind CSS v4, icônes Lucide) :
+
+- les boutons **« Jira »** sont des *launchers* : Paperclip dessine lui-même le bouton et la fenêtre (en-tête, fermeture, Échap), le plugin ne fournit que le contenu ;
+- le contenu reprend mot pour mot les recettes des composants de l'hôte (`Button`, `Input`, `Command`, filtres rapides, statuts des objets externes et des tâches) et ses tokens (`bg-background`, `text-muted-foreground`, `--status-task-icon-*`…), et utilise les composants partagés du SDK (`DataTable`, `Spinner`) ;
+- aucune couleur, taille ou police propre au plugin : le thème clair/sombre de Paperclip s'applique tel quel.
+
+Tailwind ne compile que les classes que Paperclip emploie lui-même. `tests/ui-classes.test.ts` vérifie donc que chaque classe du plugin existe dans la feuille de style de l'instance installée (`PAPERCLIP_UI_DIST` pour pointer ailleurs ; test ignoré sans installation). `tests/ui-render.test.tsx` affiche chaque écran avec un hôte simulé et refuse tout style en ligne propre au plugin.
 
 ## Limites connues
 

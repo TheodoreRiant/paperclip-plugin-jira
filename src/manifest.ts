@@ -9,7 +9,7 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.2.1",
+  version: "0.3.0",
   displayName: "Jira link",
   description:
     "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
@@ -93,20 +93,6 @@ const manifest: PaperclipPluginManifestV1 = {
         entityTypes: ["issue"],
       },
       {
-        type: "toolbarButton",
-        id: "jira-link-button",
-        displayName: "Lier à Jira",
-        exportName: "JiraToolbarButton",
-        entityTypes: ["issue"],
-      },
-      // Visibles quel que soit le mode d'affichage des tâches (chat ou classique).
-      {
-        type: "globalToolbarButton",
-        id: "jira-global-button",
-        displayName: "Jira",
-        exportName: "JiraGlobalButton",
-      },
-      {
         type: "sidebar",
         id: "jira-sidebar",
         displayName: "Jira",
@@ -118,6 +104,27 @@ const manifest: PaperclipPluginManifestV1 = {
         displayName: "Jira",
         exportName: "JiraPage",
         routePath: JIRA_PAGE_ROUTE,
+      },
+    ],
+    // Boutons « Jira » : Paperclip dessine le bouton et la fenêtre (en-tête,
+    // fermeture, Échap) avec ses propres composants ; le plugin fournit le contenu.
+    launchers: [
+      {
+        // Barre du haut : visible quel que soit le mode d'affichage des tâches.
+        id: "jira-global",
+        displayName: "Jira",
+        placementZone: "globalToolbarButton",
+        action: { type: "openPopover", target: "JiraGlobalLauncher" },
+        render: { environment: "hostOverlay", bounds: "default" },
+      },
+      {
+        // Page d'une tâche (mode classique).
+        id: "jira-issue",
+        displayName: "Jira",
+        placementZone: "toolbarButton",
+        entityTypes: ["issue"],
+        action: { type: "openModal", target: "JiraIssueLauncher" },
+        render: { environment: "hostOverlay", bounds: "default" },
       },
     ],
   },
