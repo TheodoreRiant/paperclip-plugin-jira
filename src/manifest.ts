@@ -9,10 +9,10 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.5.0",
+  version: "0.6.0",
   displayName: "Jira link",
   description:
-    "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
+    "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) libellés d'état et d'étiquettes tenus à jour, et outil de lecture pour les agents. Lecture seule côté Jira.",
   author: "Théodore Riant",
   categories: ["connector"],
   capabilities: [
@@ -22,7 +22,10 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
     "issues.read",
+    "issues.update",
     "issue.documents.read",
+    "plugin.state.read",
+    "plugin.state.write",
     "agent.tools.register",
     "ui.detailTab.register",
     "ui.action.register",
@@ -59,6 +62,13 @@ const manifest: PaperclipPluginManifestV1 = {
         description:
           "Commande à lancer, placée en tête de la tâche et suivie de la clé du ticket (ex. « /ticket » → « Lance `/ticket ABC-123` sur ce ticket. »). Laisser vide pour ne mettre aucune instruction.",
         default: "/ticket",
+      },
+      syncLabels: {
+        type: "boolean",
+        title: "Tenir les libellés à jour depuis Jira",
+        description:
+          "Pose sur chaque tâche liée l'état du ticket (« Jira : En cours »), son type et ses libellés Jira, et les met à jour quand le ticket change. Seuls les libellés posés par le plugin sont retirés.",
+        default: true,
       },
     },
   },

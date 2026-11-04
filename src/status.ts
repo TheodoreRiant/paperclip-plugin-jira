@@ -20,6 +20,21 @@ const CATEGORY_MAP: Record<string, { category: Category; tone: Tone; terminal: b
 export const DEFAULT_TTL_SECONDS = 300;
 export const DONE_TTL_SECONDS = 3600;
 
+/** Longueur maximale du libellé de statut envoyé à l'hôte. */
+export const MAX_STATUS_LABEL_LENGTH = 120;
+
+/**
+ * Libellé de la ligne « External objects » du panneau Propriétés : statut,
+ * sprint et assigné (`En cours · Sprint 42 · Marie Dupont`). L'hôte l'affiche
+ * après le résumé du ticket ; la ligne complète est dans l'infobulle.
+ */
+export function statusLabelFor(issue: Pick<JiraIssueSummary, "statusName" | "sprint" | "assignee">): string {
+  const parts = [issue.statusName, issue.sprint, issue.assignee]
+    .map((part) => (part ?? "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  return parts.join(" · ").slice(0, MAX_STATUS_LABEL_LENGTH);
+}
+
 export function snapshotFromIssue(issue: JiraIssueSummary): PluginExternalObjectResolvedSnapshot {
   const mapped = CATEGORY_MAP[issue.statusCategoryKey] ?? { category: "unknown", tone: "muted", terminal: false };
   return {
@@ -27,7 +42,7 @@ export function snapshotFromIssue(issue: JiraIssueSummary): PluginExternalObject
     displayTitle: issue.summary || null,
     iconKey: "jira",
     statusKey: issue.statusName.toLowerCase(),
-    statusLabel: issue.statusName,
+    statusLabel: statusLabelFor(issue),
     statusCategory: mapped.category,
     statusTone: mapped.tone,
     isTerminal: mapped.terminal,
@@ -41,6 +56,8 @@ export function snapshotFromIssue(issue: JiraIssueSummary): PluginExternalObject
       status: issue.statusName,
       assignee: issue.assignee,
       priority: issue.priority,
+      sprint: issue.sprint,
+      labels: issue.labels,
       updated: issue.updated,
       url: issue.url,
     },

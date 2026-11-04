@@ -19,6 +19,11 @@ export interface JiraConfig {
    * clé (`/ticket ABC-123`). Chaîne vide : pas d'instruction.
    */
   importCommand: string;
+  /**
+   * Tenir les libellés des tâches à jour depuis leurs tickets : état
+   * (`Jira : En cours`), type et libellés Jira. Activé par défaut.
+   */
+  syncLabels: boolean;
 }
 
 export const DEFAULT_IMPORT_COMMAND = "/ticket";
@@ -61,8 +66,10 @@ export function parseConfig(raw: Record<string, unknown> | null | undefined): Co
 
   const importCommand = typeof source.importCommand === "string" ? source.importCommand.trim() : DEFAULT_IMPORT_COMMAND;
 
+  const syncLabels = source.syncLabels !== false;
+
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, config: { siteUrl, siteHost, email, apiTokenRef, importCommand } };
+  return { ok: true, config: { siteUrl, siteHost, email, apiTokenRef, importCommand, syncLabels } };
 }
 
 function isSecretRef(value: unknown): boolean {

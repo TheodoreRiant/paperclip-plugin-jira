@@ -4,6 +4,8 @@ import type { Issue } from "@paperclipai/plugin-sdk";
 import type { PluginExternalObjectRecordSnapshot, PluginExternalObjectUrlCandidate } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
 import plugin, {
+  resetSprintFieldCache,
+  type LabelRequestsData,
   type ImportedTaskDraft,
   type IssueLinksData,
   type LinkDocumentChange,
@@ -31,7 +33,12 @@ interface FakeJiraIssue {
   description?: unknown;
   /** Champs Jira supplémentaires renvoyés quand ils sont demandés (import). */
   extra?: Record<string, unknown>;
+  labels?: string[];
+  /** Valeur brute du champ Sprint (liste de sprints Jira Software). */
+  sprints?: Array<{ name: string; state: string }>;
 }
+
+export const SPRINT_FIELD = "customfield_10020";
 
 class FakeJira {
   issues = new Map<string, FakeJiraIssue>();
@@ -42,6 +49,8 @@ class FakeJira {
   /** Tickets « consultés récemment » renvoyés par le picker pour une requête vide. */
   recent: string[] = [];
   lastAuthorization: string | null = null;
+  /** Le site a-t-il Jira Software (champ Sprint) ? */
+  hasSprintField = false;
 
   add(key: string, summary: string, status = "À faire", category: FakeJiraIssue["category"] = "new") {
     this.issues.set(key, { key, summary, status, category });
@@ -55,6 +64,12 @@ class FakeJira {
     if (this.authStatus) return json(this.authStatus, { errorMessages: ["Unauthorized"] });
 
     if (url.pathname === "/rest/api/3/myself") return json(200, { displayName: "Bot", accountId: "a1" });
+
+    if (url.pathname === "/rest/api/3/field") {
+      const fields: unknown[] = [{ id: "summary", schema: { type: "string", system: "summary" } }];
+      if (this.hasSprintField) fields.push({ id: SPRINT_FIELD, schema: { type: "array", custom: "com.pyxis.greenhopper.jira:gh-sprint" } });
+      return json(200, fields);
+    }
 
     // Comme Jira : vide → historique ; sinon début de clé ou début de mot du résumé.
     if (url.pathname === "/rest/api/3/issue/picker") {
@@ -77,6 +92,7 @@ class FakeJira {
       for (const [name, value] of Object.entries(issue.extra ?? {})) {
         if (fields.includes(name)) Object.assign(body.fields, { [name]: value });
       }
+      if (!fields.includes(SPRINT_FIELD)) delete (body.fields as Record<string, unknown>)[SPRINT_FIELD];
       return json(200, body);
     }
 
@@ -112,6 +128,8 @@ class FakeJira {
         assignee: { displayName: "Alice" },
         priority: { name: "Medium" },
         updated: "2026-11-01T10:00:00.000+0100",
+        labels: issue.labels ?? [],
+        ...(this.hasSprintField ? { [SPRINT_FIELD]: issue.sprints ?? null } : {}),
       },
     };
   }
@@ -197,6 +215,7 @@ beforeEach(async () => {
   jira.add("ABC-2", "Export comptable", "Terminé", "done");
   jira.add("ABC-7", "Erreur 500 à la connexion");
   vi.stubGlobal("fetch", jira.fetch);
+  resetSprintFieldCache();
   await setupHarness();
 });
 
@@ -258,7 +277,7 @@ describe("résolution du statut", () => {
     });
     expect(result).toMatchObject({
       ok: true,
-      snapshot: { statusLabel: "En cours", statusCategory: "running", displayTitle: "Écran de connexion" },
+      snapshot: { statusLabel: "En cours · Alice", statusCategory: "running", displayTitle: "Écran de connexion" },
     });
     expect(jira.lastAuthorization).toMatch(/^Basic /);
   });
@@ -303,7 +322,8 @@ describe("résolution du statut", () => {
       companyId: COMPANY,
       objects: [objectRecord("o1", "ABC-1"), objectRecord("o2", "ABC-2"), objectRecord("o3", "ABC-404")],
     });
-    expect(jira.calls).toEqual(["POST /rest/api/3/search/jql"]);
+    // La recherche du champ Sprint, faite une seule fois par site, mise à part.
+    expect(jira.calls.filter((c) => c !== "GET /rest/api/3/field")).toEqual(["POST /rest/api/3/search/jql"]);
     expect(result.results).toMatchObject([
       { objectId: "o1", result: { ok: true, snapshot: { statusCategory: "running" } } },
       { objectId: "o2", result: { ok: true, snapshot: { statusCategory: "closed", isTerminal: true } } },
@@ -610,5 +630,142 @@ describe("créer une tâche depuis un ticket", () => {
     await expect(harness.performAction("prepare-import", { input: "ABC-999" }, { companyId: COMPANY })).rejects.toThrow(
       /introuvable/,
     );
+  });
+});
+
+describe("ligne « External objects » enrichie", () => {
+  it("ajoute le sprint actif, trouvé sans configuration", async () => {
+    jira.hasSprintField = true;
+    jira.issues.get("ABC-1")!.sprints = [
+      { name: "Sprint 41", state: "closed" },
+      { name: "Sprint 42", state: "active" },
+    ];
+    const result = await def.onResolveExternalObject!({
+      companyId: COMPANY,
+      providerKey: "jira",
+      objectType: "issue",
+      externalId: "ABC-1",
+      object: objectRecord("o1", "ABC-1"),
+    });
+    expect(result).toMatchObject({ ok: true, snapshot: { statusLabel: "En cours · Sprint 42 · Alice", data: { sprint: "Sprint 42" } } });
+  });
+
+  it("sans Jira Software : pas de sprint, le reste marche", async () => {
+    const result = await def.onResolveExternalObject!({
+      companyId: COMPANY,
+      providerKey: "jira",
+      objectType: "issue",
+      externalId: "ABC-1",
+      object: objectRecord("o1", "ABC-1"),
+    });
+    expect(result).toMatchObject({ ok: true, snapshot: { statusLabel: "En cours · Alice" } });
+    // Le champ Sprint n'est cherché qu'une fois.
+    await def.onResolveExternalObject!({ companyId: COMPANY, providerKey: "jira", objectType: "issue", externalId: "ABC-1", object: objectRecord("o1", "ABC-1") });
+    expect(jira.calls.filter((c) => c === "GET /rest/api/3/field")).toHaveLength(1);
+  });
+});
+
+describe("libellés tenus à jour", () => {
+  const labelIdsOf = async () => ((await harness.ctx.issues.get(ISSUE_ID, COMPANY)) as unknown as { labelIds?: string[] }).labelIds ?? [];
+  const registerAll = (labels: Array<{ id: string; name: string }>) =>
+    harness.performAction("register-labels", { companyId: COMPANY, labels });
+  const resolve = (key: string) =>
+    def.onResolveExternalObject!({ companyId: COMPANY, providerKey: "jira", objectType: "issue", externalId: key, object: objectRecord("o", key) });
+
+  beforeEach(async () => {
+    jira.issues.get("ABC-7")!.labels = ["front"];
+    await harness.ctx.issues.update(ISSUE_ID, { labelIds: ["manuel"] }, COMPANY);
+  });
+
+  it("affiche une tâche : pose l'état, le type et les libellés Jira du ticket, garde les autres", async () => {
+    await registerAll([
+      { id: "s-todo", name: "Jira : À faire" },
+      { id: "t-story", name: "story" },
+      { id: "l-front", name: "Front" },
+    ]);
+    await harness.getData<IssueLinksData>("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+    expect(await labelIdsOf()).toEqual(["manuel", "s-todo", "t-story", "l-front"]);
+  });
+
+  it("le ticket change d'état : l'interface crée le libellé manquant, puis la tâche est mise à jour", async () => {
+    await registerAll([
+      { id: "s-todo", name: "Jira : À faire" },
+      { id: "t-story", name: "Story" },
+      { id: "l-front", name: "front" },
+    ]);
+    await harness.getData("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+
+    const ticket = jira.issues.get("ABC-7")!;
+    ticket.status = "En cours";
+    ticket.category = "indeterminate";
+    await resolve("ABC-7");
+    // Le libellé « Jira : En cours » n'existe pas encore : l'ancien état est retiré, le nouveau demandé.
+    expect(await labelIdsOf()).toEqual(["manuel", "t-story", "l-front"]);
+    const requests = await harness.getData<LabelRequestsData>("label-requests", { companyId: COMPANY });
+    expect(requests).toEqual({ enabled: true, registryKnown: true, requests: [{ name: "Jira : En cours", color: "#f97316" }] });
+
+    await registerAll([
+      { id: "s-todo", name: "Jira : À faire" },
+      { id: "s-doing", name: "Jira : En cours" },
+      { id: "t-story", name: "Story" },
+      { id: "l-front", name: "front" },
+    ]);
+    expect((await labelIdsOf()).sort()).toEqual(["l-front", "manuel", "s-doing", "t-story"]);
+    expect((await harness.getData<LabelRequestsData>("label-requests", { companyId: COMPANY })).requests).toEqual([]);
+  });
+
+  it("le ticket ne change pas : aucune écriture sur la tâche", async () => {
+    await registerAll([{ id: "s-todo", name: "Jira : À faire" }, { id: "t-story", name: "Story" }, { id: "l-front", name: "front" }]);
+    await harness.getData("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+    const update = vi.spyOn(harness.ctx.issues, "update");
+    await resolve("ABC-7");
+    await harness.getData("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("un ticket délié : ses libellés sont retirés", async () => {
+    await registerAll([
+      { id: "s-todo", name: "Jira : À faire" },
+      { id: "s-doing", name: "Jira : En cours" },
+      { id: "t-story", name: "Story" },
+      { id: "l-front", name: "front" },
+    ]);
+    await harness.ctx.issues.update(ISSUE_ID, { description: "Plus de ticket" }, COMPANY);
+    await writeLinksDocument(["ABC-1"]);
+    await harness.performAction("sync-issue-labels", { companyId: COMPANY, issueId: ISSUE_ID });
+    expect(await labelIdsOf()).toEqual(["manuel", "s-doing", "t-story"]);
+
+    await harness.ctx.issues.documents.delete(ISSUE_ID, LINKS_DOCUMENT_KEY, COMPANY);
+    await harness.performAction("sync-issue-labels", { companyId: COMPANY, issueId: ISSUE_ID });
+    expect(await labelIdsOf()).toEqual(["manuel"]);
+  });
+
+  it("la page Jira transmet les liens : les tâches sont synchronisées en un seul appel Jira", async () => {
+    await registerAll([{ id: "s-todo", name: "Jira : À faire" }, { id: "t-story", name: "Story" }, { id: "l-front", name: "front" }]);
+    jira.calls = [];
+    const result = await harness.performAction<{ synced: number }>("index-links", {
+      companyId: COMPANY,
+      links: [{ issueId: ISSUE_ID, key: "abc-7" }],
+    });
+    expect(result.synced).toBe(1);
+    expect(await labelIdsOf()).toEqual(["manuel", "s-todo", "t-story", "l-front"]);
+    expect(jira.calls.filter((c) => c.includes("/search/jql"))).toHaveLength(1);
+  });
+
+  it("avant que l'interface ait transmis les libellés : tout est demandé", async () => {
+    await harness.getData("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+    const requests = await harness.getData<LabelRequestsData>("label-requests", { companyId: COMPANY });
+    expect(requests.registryKnown).toBe(false);
+    expect(requests.requests.map((r) => r.name)).toEqual(["Jira : À faire", "Story", "front"]);
+    expect(await labelIdsOf()).toEqual(["manuel"]);
+  });
+
+  it("désactivé dans la configuration : rien n'est touché", async () => {
+    await setupHarness({ ...CONFIG, syncLabels: false });
+    await harness.ctx.issues.update(ISSUE_ID, { labelIds: ["manuel"] }, COMPANY);
+    await registerAll([{ id: "s-todo", name: "Jira : À faire" }]);
+    await harness.getData("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });
+    expect(await labelIdsOf()).toEqual(["manuel"]);
+    expect(await harness.getData<LabelRequestsData>("label-requests", { companyId: COMPANY })).toMatchObject({ enabled: false });
   });
 });

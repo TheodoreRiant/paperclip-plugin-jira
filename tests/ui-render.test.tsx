@@ -5,7 +5,7 @@
  */
 import { createElement, Fragment, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { IssueLinksData, TicketsData } from "../src/worker.js";
 
 const ISSUE = {
@@ -19,6 +19,8 @@ const ISSUE = {
   assignee: "Alice",
   updated: "2026-11-01T10:00:00.000Z",
   url: "https://acme.atlassian.net/browse/ABC-12",
+  labels: [],
+  sprint: null,
 };
 
 let ISSUE_LINKS: IssueLinksData = {
@@ -176,5 +178,42 @@ describe("écrans du plugin", () => {
     expect(html).toContain("Tâches liées à Jira");
     expect(html).toContain("Écarts (0)");
     expect(ownStyles(html)).toEqual([]);
+  });
+});
+
+describe("création des libellés demandés par le worker", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("ne crée que les libellés absents (casse ignorée), puis transmet tous ceux de la société", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      calls.push({ method, url, body });
+      const payload = method === "GET" ? [{ id: "l1", name: "story", color: "#000" }] : { id: "l2", ...body };
+      return new Response(JSON.stringify(payload), { status: method === "GET" ? 200 : 201 });
+    });
+    const ui = (await import("../src/ui/index.js")) as unknown as {
+      provisionLabels: (c: string, w: Array<{ name: string; color: string }>, r: (l: unknown[]) => Promise<unknown>) => Promise<void>;
+    };
+    let registered: unknown[] = [];
+    await ui.provisionLabels(
+      "company-1",
+      [
+        { name: "Story", color: "#111111" },
+        { name: "Jira : En cours", color: "#f97316" },
+      ],
+      async (labels) => {
+        registered = labels;
+      },
+    );
+    expect(calls).toEqual([
+      { method: "GET", url: "/api/companies/company-1/labels", body: undefined },
+      { method: "POST", url: "/api/companies/company-1/labels", body: { name: "Jira : En cours", color: "#f97316" } },
+    ]);
+    expect(registered).toEqual([
+      { id: "l1", name: "story" },
+      { id: "l2", name: "Jira : En cours" },
+    ]);
   });
 });

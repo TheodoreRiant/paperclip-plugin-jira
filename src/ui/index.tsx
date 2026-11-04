@@ -14,7 +14,14 @@ import {
   type PluginPageProps,
   type PluginSidebarProps,
 } from "@paperclipai/plugin-sdk/ui";
-import type { ImportedTaskDraft, IssueLinksData, LinkDocumentChange, TicketView, TicketsData } from "../worker.js";
+import type {
+  ImportedTaskDraft,
+  IssueLinksData,
+  LabelRequestsData,
+  LinkDocumentChange,
+  TicketView,
+  TicketsData,
+} from "../worker.js";
 import {
   buildOverview,
   taskRefFromPath,
@@ -443,6 +450,7 @@ function TicketSearchBox({
 
 function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId: string; onLinked: () => void }) {
   const prepareLink = usePluginAction("prepare-link");
+  const syncLabels = usePluginAction("sync-issue-labels");
   const toast = usePluginToast();
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -456,6 +464,7 @@ function LinkForm({ companyId, issueId, onLinked }: { companyId: string; issueId
         toast({ title: `${change.key} est déjà lié à cette tâche.`, tone: "info" });
       } else {
         await applyDocumentChange(issueId, change);
+        void syncLabels({ companyId, issueId }).catch(() => undefined);
         toast({ title: `Ticket ${change.key} lié.`, tone: "success" });
       }
       onLinked();
@@ -515,6 +524,7 @@ interface IssueLinksState {
 function IssueJiraContent({ companyId, issueId, state }: { companyId: string; issueId: string; state: IssueLinksState }) {
   const { data, loading, error, refresh } = state;
   const prepareUnlink = usePluginAction("prepare-unlink");
+  const syncLabels = usePluginAction("sync-issue-labels");
   const toast = usePluginToast();
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [addingAnother, setAddingAnother] = useState(false);
@@ -524,6 +534,8 @@ function IssueJiraContent({ companyId, issueId, state }: { companyId: string; is
     try {
       const change = (await prepareUnlink({ companyId, issueId, key })) as LinkDocumentChange;
       await applyDocumentChange(issueId, change);
+      // Les libellés posés pour ce ticket sont retirés.
+      void syncLabels({ companyId, issueId }).catch(() => undefined);
       toast({ title: `Ticket ${key} délié.`, tone: "success" });
       refresh();
     } catch (err) {
@@ -788,6 +800,7 @@ export function JiraToolbarButton() {
   const links = usePluginData<IssueLinksData>("issue-links", task ? { companyId, issueId: task.id } : { companyId });
   const linksState: IssueLinksState = task ? links : IDLE_LINKS;
   const tickets = taskTickets(linksState.data);
+  useLabelProvisioning(companyId);
 
   if (!companyId) return null;
 
@@ -801,6 +814,63 @@ export function JiraToolbarButton() {
       ) : null}
     </>
   );
+}
+
+/** Intervalle de relecture des libellés demandés par le worker. */
+const LABEL_POLL_MS = 60_000;
+
+/**
+ * Crée dans Paperclip les libellés que le worker veut poser (`Jira : En cours`,
+ * type, libellés Jira) et lui transmet ceux de la société : le worker ne peut
+ * pas en créer lui-même. Monté avec le bouton de la barre du haut, donc sur
+ * toutes les pages. Un échec n'est pas retenté avant le prochain affichage.
+ */
+function useLabelProvisioning(companyId: string) {
+  const requests = usePluginData<LabelRequestsData>("label-requests", companyId ? { companyId } : {});
+  const register = usePluginAction("register-labels");
+  const running = useRef(false);
+  const failed = useRef(false);
+  const { refresh } = requests;
+
+  useEffect(() => {
+    if (!companyId) return;
+    const timer = setInterval(refresh, LABEL_POLL_MS);
+    return () => clearInterval(timer);
+  }, [companyId, refresh]);
+
+  useEffect(() => {
+    const data = requests.data;
+    if (!companyId || !data?.enabled || running.current || failed.current) return;
+    if (data.registryKnown && data.requests.length === 0) return;
+    running.current = true;
+    void (async () => {
+      try {
+        await provisionLabels(companyId, data.requests, (labels) => register({ companyId, labels }));
+        refresh();
+      } catch {
+        failed.current = true;
+      } finally {
+        running.current = false;
+      }
+    })();
+  }, [companyId, requests.data]);
+}
+
+/** Crée les libellés absents (casse ignorée) puis transmet tous ceux de la société. */
+export async function provisionLabels(
+  companyId: string,
+  wanted: Array<{ name: string; color: string }>,
+  registerAll: (labels: HostLabel[]) => Promise<unknown>,
+): Promise<void> {
+  const base = `/api/companies/${encodeURIComponent(companyId)}/labels`;
+  const existing = await hostJson<HostLabel[]>(base);
+  const { missing } = matchLabels(wanted.map((w) => w.name), existing);
+  const created: HostLabel[] = [];
+  for (const name of missing) {
+    const color = wanted.find((w) => w.name === name)?.color ?? labelColor(name);
+    created.push(await hostJson<HostLabel>(base, { method: "POST", body: JSON.stringify({ name, color }) }));
+  }
+  await registerAll([...existing, ...created].map(({ id, name }) => ({ id, name })));
 }
 
 /** Rendu du bouton selon les tickets de la tâche affichée. Exporté pour les tests de rendu. */
@@ -968,6 +1038,14 @@ export function JiraPage({ context }: PluginPageProps) {
       cancelled = true;
     };
   }, [companyId, reloadToken]);
+
+  // La page connaît tous les liens tâche ↔ ticket : le worker s'en sert pour
+  // tenir les libellés à jour, tâches liées avant cette version comprises.
+  const indexLinks = usePluginAction("index-links");
+  useEffect(() => {
+    if (!companyId || !overview || overview.rows.length === 0) return;
+    void indexLinks({ companyId, links: overview.rows.map((r) => ({ issueId: r.task.id, key: r.key })) }).catch(() => undefined);
+  }, [companyId, overview]);
 
   const keys = useMemo(() => [...new Set((overview?.rows ?? []).map((r) => r.key))].sort(), [overview]);
   const tickets = usePluginData<TicketsData>("tickets", { companyId, keys });

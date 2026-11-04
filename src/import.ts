@@ -77,13 +77,12 @@ export function draftTaskFromTicket(
     title,
     description: `${parts.join("\n\n")}\n`,
     priority: priorityFromJira(issue.priority),
-    labels: labelNames([issue.issueType, ...details.labels]),
+    labels: labelNames([issue.issueType, ...issue.labels]),
   };
 }
 
 const EMPTY_DETAILS: JiraImportDetails = {
   reporter: null,
-  labels: [],
   components: [],
   fixVersions: [],
   parent: null,
@@ -100,11 +99,12 @@ function propertiesTable(issue: JiraIssueSummary, details: JiraImportDetails): s
     ["Statut", issue.statusName],
     ["Priorité", issue.priority],
     ["Assigné", issue.assignee],
+    ["Sprint", issue.sprint],
     ["Rapporteur", details.reporter],
     ["Parent", parent],
     ["Composants", details.components.join(", ") || null],
     ["Versions", details.fixVersions.join(", ") || null],
-    ["Libellés", details.labels.join(", ") || null],
+    ["Libellés", issue.labels.join(", ") || null],
     ["Échéance", details.dueDate],
     ["Créé le", details.created?.slice(0, 10) ?? null],
   ];

@@ -26,6 +26,10 @@ export interface JiraIssueSummary {
   assignee: string | null;
   priority: string | null;
   updated: string | null;
+  /** Libellés Jira du ticket. */
+  labels: string[];
+  /** Sprint actif du ticket (sinon le prochain, sinon le dernier) ; `null` sans Jira Software. */
+  sprint: string | null;
 }
 
 export type JiraErrorKind = "auth" | "not_found" | "rate_limited" | "unreachable" | "bad_request";
@@ -42,15 +46,17 @@ export class JiraError extends Error {
   }
 }
 
-export const ISSUE_FIELDS = ["summary", "status", "issuetype", "assignee", "priority", "updated"] as const;
+export const ISSUE_FIELDS = ["summary", "status", "issuetype", "assignee", "priority", "updated", "labels"] as const;
 
 /** Champs supplémentaires lus pour créer une tâche depuis un ticket. */
-export const IMPORT_FIELDS = ["description", "reporter", "labels", "components", "fixVersions", "parent", "duedate", "created"] as const;
+export const IMPORT_FIELDS = ["description", "reporter", "components", "fixVersions", "parent", "duedate", "created"] as const;
+
+/** Type du champ « Sprint » de Jira Software ; son id (`customfield_…`) varie d'un site à l'autre. */
+export const SPRINT_FIELD_SCHEMA = "com.pyxis.greenhopper.jira:gh-sprint";
 
 /** Propriétés d'un ticket reprises dans la tâche créée depuis celui-ci. */
 export interface JiraImportDetails {
   reporter: string | null;
-  labels: string[];
   components: string[];
   fixVersions: string[];
   parent: { key: string; summary: string | null; url: string } | null;
@@ -66,11 +72,19 @@ export const ASSIGNED_TO_ME_JQL = "assignee = currentUser() AND statusCategory !
 
 export class JiraClient {
   private readonly authHeader: string;
+  private readonly sprintFieldResolver: () => Promise<string | null>;
+  private sprintFieldId: string | null = null;
 
   constructor(
     private readonly credentials: JiraCredentials,
     private readonly fetchImpl: FetchLike,
+    /**
+     * Id du champ « Sprint » du site (voir `findSprintField`) ; `null` : pas de
+     * sprint. Une fonction est appelée à la première lecture d'un ticket.
+     */
+    sprintField: string | null | (() => Promise<string | null>) = null,
   ) {
+    this.sprintFieldResolver = typeof sprintField === "function" ? sprintField : async () => sprintField;
     const raw = `${credentials.email}:${credentials.apiToken}`;
     this.authHeader = `Basic ${Buffer.from(raw, "utf8").toString("base64")}`;
   }
@@ -84,8 +98,26 @@ export class JiraClient {
     };
   }
 
+  /**
+   * Id du champ « Sprint » du site, ou `null` s'il n'existe pas (Jira Work
+   * Management, Jira Software absent).
+   */
+  async findSprintField(): Promise<string | null> {
+    const fields = (await this.request("GET", "/rest/api/3/field")) as unknown;
+    if (!Array.isArray(fields)) return null;
+    for (const field of fields as { id?: unknown; schema?: { custom?: unknown } }[]) {
+      if (field?.schema?.custom === SPRINT_FIELD_SCHEMA && typeof field.id === "string") return field.id;
+    }
+    return null;
+  }
+
+  private async fields(extra: readonly string[] = []): Promise<string[]> {
+    this.sprintFieldId = await this.sprintFieldResolver();
+    return [...ISSUE_FIELDS, ...(this.sprintFieldId ? [this.sprintFieldId] : []), ...extra];
+  }
+
   async getIssue(key: string): Promise<JiraIssueSummary> {
-    const query = new URLSearchParams({ fields: ISSUE_FIELDS.join(",") });
+    const query = new URLSearchParams({ fields: (await this.fields()).join(",") });
     const body = await this.request("GET", `/rest/api/3/issue/${encodeURIComponent(key)}?${query}`);
     return this.toSummary(body);
   }
@@ -156,6 +188,8 @@ export class JiraClient {
           assignee: null,
           priority: null,
           updated: null,
+          labels: [],
+          sprint: null,
         },
     );
   }
@@ -183,7 +217,7 @@ export class JiraClient {
    * versions, parent, échéance).
    */
   async getIssueForImport(key: string): Promise<{ issue: JiraIssueSummary; description: unknown; details: JiraImportDetails }> {
-    const query = new URLSearchParams({ fields: [...ISSUE_FIELDS, ...IMPORT_FIELDS].join(",") });
+    const query = new URLSearchParams({ fields: (await this.fields(IMPORT_FIELDS)).join(",") });
     const body = (await this.request("GET", `/rest/api/3/issue/${encodeURIComponent(key)}?${query}`)) as {
       fields?: Record<string, any>;
     };
@@ -194,7 +228,6 @@ export class JiraClient {
       description: fields.description ?? null,
       details: {
         reporter: stringOrNull(fields.reporter?.displayName),
-        labels: stringList(fields.labels),
         components: namesOf(fields.components),
         fixVersions: namesOf(fields.fixVersions),
         parent: parentKey
@@ -213,7 +246,7 @@ export class JiraClient {
   private async searchJql(jql: string, maxResults: number): Promise<JiraIssueSummary[]> {
     const body = (await this.request("POST", "/rest/api/3/search/jql", {
       jql,
-      fields: [...ISSUE_FIELDS],
+      fields: await this.fields(),
       maxResults,
     })) as { issues?: unknown[] };
     return (body.issues ?? []).map((issue) => this.toSummary(issue));
@@ -284,8 +317,24 @@ export class JiraClient {
       assignee: stringOrNull(fields.assignee?.displayName),
       priority: stringOrNull(fields.priority?.name),
       updated: stringOrNull(fields.updated),
+      labels: stringList(fields.labels),
+      sprint: this.sprintFieldId ? sprintName(fields[this.sprintFieldId]) : null,
     };
   }
+}
+
+/**
+ * Nom du sprint à afficher : l'actif, sinon le prochain, sinon le dernier
+ * (un ticket reporté garde la liste de ses anciens sprints).
+ */
+export function sprintName(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const sprints = value.filter(
+    (s): s is { name: string; state?: unknown } => Boolean(s) && typeof s === "object" && typeof (s as { name?: unknown }).name === "string",
+  );
+  const pick =
+    sprints.find((s) => s.state === "active") ?? sprints.find((s) => s.state === "future") ?? sprints[sprints.length - 1];
+  return pick?.name.trim() || null;
 }
 
 function stringOrNull(value: unknown): string | null {

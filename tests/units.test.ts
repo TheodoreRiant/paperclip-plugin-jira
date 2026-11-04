@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.js";
-import { JiraError, type JiraIssueSummary } from "../src/jira-client.js";
+import { JiraError, sprintName, type JiraIssueSummary } from "../src/jira-client.js";
 import { issueKeyFromInput, issueKeyFromUrl, normalizeIssueKey } from "../src/jira-url.js";
 import { issueKeysInText, parseLinksDocument, renderLinksDocument } from "../src/links.js";
-import { resultFromError, snapshotFromIssue } from "../src/status.js";
+import { resultFromError, snapshotFromIssue, statusLabelFor } from "../src/status.js";
+import { desiredLabels, mergeRequests, planLabels, registryFrom, statusLabelName } from "../src/label-sync.js";
 import { HOST_LABEL_COLORS, importInstruction, labelColor, labelNames, matchLabels, priorityFromJira } from "../src/import.js";
 
 const HOST = "acme.atlassian.net";
@@ -21,6 +22,8 @@ function issue(overrides: Partial<JiraIssueSummary> = {}): JiraIssueSummary {
     assignee: "Alice",
     priority: "High",
     updated: "2026-11-01T10:00:00.000+0100",
+    labels: [],
+    sprint: null,
     ...overrides,
   };
 }
@@ -106,7 +109,7 @@ describe("status", () => {
 
   it("les données exposées au board se limitent aux champs choisis", () => {
     expect(Object.keys(snapshotFromIssue(issue()).data ?? {}).sort()).toEqual(
-      ["assignee", "issueType", "key", "priority", "status", "summary", "updated", "url"].sort(),
+      ["assignee", "issueType", "key", "labels", "priority", "sprint", "status", "summary", "updated", "url"].sort(),
     );
   });
 
@@ -157,5 +160,88 @@ describe("import : propriétés reprises dans la tâche", () => {
   it("formule l'instruction, ou rien si la commande est vide", () => {
     expect(importInstruction("/ticket", "ABC-1")).toBe("Lance `/ticket ABC-1` sur ce ticket.");
     expect(importInstruction("  ", "ABC-1")).toBeNull();
+  });
+});
+
+describe("ligne « External objects » : statut · sprint · assigné", () => {
+  it("assemble les informations présentes, dans cet ordre", () => {
+    expect(statusLabelFor({ statusName: "En cours", sprint: "Sprint 42", assignee: "Marie Dupont" })).toBe(
+      "En cours · Sprint 42 · Marie Dupont",
+    );
+    expect(statusLabelFor({ statusName: "À faire", sprint: null, assignee: null })).toBe("À faire");
+    expect(snapshotFromIssue(issue({ sprint: "Sprint 42" })).statusLabel).toBe("En cours · Sprint 42 · Alice");
+  });
+
+  it("garde le sprint actif, sinon le prochain, sinon le dernier", () => {
+    expect(sprintName([{ name: "S1", state: "closed" }, { name: "S2", state: "active" }, { name: "S3", state: "future" }])).toBe("S2");
+    expect(sprintName([{ name: "S1", state: "closed" }, { name: "S3", state: "future" }])).toBe("S3");
+    expect(sprintName([{ name: "S1", state: "closed" }, { name: "S2", state: "closed" }])).toBe("S2");
+    expect(sprintName(null)).toBeNull();
+    expect(sprintName([])).toBeNull();
+  });
+});
+
+describe("libellés tenus à jour depuis Jira", () => {
+  const ticket = { statusName: "En cours", statusCategoryKey: "indeterminate", issueType: "Story", labels: ["front", "Story"] };
+
+  it("veut l'état, le type et les libellés Jira, sans doublon", () => {
+    expect(desiredLabels([ticket]).map((l) => l.name)).toEqual(["Jira : En cours", "Story", "front"]);
+    expect(desiredLabels([ticket])[0]?.color).toBe("#f97316");
+    expect(statusLabelName("  En   revue ")).toBe("Jira : En revue");
+  });
+
+  it("première fois : ajoute sans toucher aux libellés posés à la main", () => {
+    const plan = planLabels({
+      currentIds: ["manuel"],
+      previous: null,
+      desired: desiredLabels([ticket]),
+      registry: registryFrom([
+        { id: "s1", name: "Jira : En cours" },
+        { id: "t1", name: "story" },
+        { id: "f1", name: "Front" },
+      ]),
+    });
+    expect(plan).toMatchObject({ changed: true, labelIds: ["manuel", "s1", "t1", "f1"], missing: [] });
+    expect(plan.next).toEqual({ appliedNames: ["Jira : En cours", "Story", "front"], managedIds: ["s1", "t1", "f1"] });
+  });
+
+  it("le ticket change : remplace ce que le plugin avait posé, demande les libellés manquants", () => {
+    const plan = planLabels({
+      currentIds: ["manuel", "s1", "t1"],
+      previous: { appliedNames: ["Jira : En cours", "Story"], managedIds: ["s1", "t1"] },
+      desired: desiredLabels([{ ...ticket, statusName: "Terminé", statusCategoryKey: "done", labels: [] }]),
+      registry: { "jira : en cours": "s1", story: "t1" },
+    });
+    expect(plan.labelIds).toEqual(["manuel", "t1"]);
+    expect(plan.missing).toEqual([{ name: "Jira : Terminé", color: "#22c55e" }]);
+    expect(plan.next).toEqual({ appliedNames: ["Story"], managedIds: ["t1"] });
+  });
+
+  it("rien ne change tant que le ticket ne change pas, même si un libellé a été retiré à la main", () => {
+    const previous = { appliedNames: ["Jira : En cours"], managedIds: ["s1"] };
+    const plan = planLabels({
+      currentIds: ["manuel"],
+      previous,
+      desired: desiredLabels([{ ...ticket, issueType: null, labels: [] }]),
+      registry: { "jira : en cours": "s1" },
+    });
+    expect(plan).toMatchObject({ changed: false, labelIds: ["manuel"], next: previous });
+  });
+
+  it("plus de ticket : retire tout ce que le plugin avait posé", () => {
+    const plan = planLabels({
+      currentIds: ["manuel", "s1"],
+      previous: { appliedNames: ["Jira : En cours"], managedIds: ["s1"] },
+      desired: [],
+      registry: {},
+    });
+    expect(plan).toMatchObject({ changed: true, labelIds: ["manuel"], next: { appliedNames: [], managedIds: [] } });
+  });
+
+  it("fusionne les demandes de création sans doublon", () => {
+    expect(mergeRequests([{ name: "Story", color: "a" }], [{ name: "story", color: "b" }, { name: "Bug", color: "c" }])).toEqual([
+      { name: "Story", color: "a" },
+      { name: "Bug", color: "c" },
+    ]);
   });
 });

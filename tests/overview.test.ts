@@ -82,6 +82,8 @@ describe("draftTaskFromTicket", () => {
     assignee: null,
     priority: "High",
     updated: null,
+    labels: [],
+    sprint: null,
   };
 
   it("titre préfixé par la clé ; instruction, lien, propriétés puis description", () => {
