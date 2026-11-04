@@ -1,14 +1,16 @@
 # paperclip-plugin-jira
 
-Plugin [Paperclip](https://github.com/paperclipai/paperclip) qui lie une tâche à un ou plusieurs tickets **Jira Cloud** et affiche leur statut. En v1, le plugin ne fait que lire Jira : il n'y écrit jamais.
+Plugin [Paperclip](https://github.com/paperclipai/paperclip) qui lie une tâche à un ou plusieurs tickets **Jira Cloud** et affiche leur statut. Le plugin ne fait que lire Jira : il n'y écrit jamais.
 
 ## Fonctionnalités
 
 | Quoi | Comment |
 |---|---|
 | **Pastille de statut native** | Une URL de ticket (`https://<site>.atlassian.net/browse/ABC-123`) collée dans le titre, la description, un commentaire ou un document d'une tâche est reconnue par Paperclip. L'hôte affiche alors la pastille de statut : ouvert, en cours ou terminé. Le plugin s'appuie sur le mécanisme natif `objectReferences`, sans stockage ni rendu maison. |
-| **Lier sans coller de lien** | Le bouton **« Lier à Jira »** de la barre d'outils d'une tâche, ou le formulaire de l'onglet **Jira**, accepte une clé (`ABC-123`), une URL ou un texte à chercher. Le ticket est d'abord vérifié auprès de Jira. |
-| **Onglet Jira** | Il liste les tickets liés (avec un bouton **Délier**) et ceux cités dans le titre ou la description. Pour chacun, il affiche le statut, le résumé, le type, la priorité et l'assigné. |
+| **Bouton « Jira » dans la barre du haut** | Toujours visible, quel que soit l'affichage des tâches (chat ou classique). Sur une tâche, il ouvre ses tickets liés : statut, résumé, assigné, bouton **Délier**, et un champ pour lier un ticket par clé (`ABC-123`), URL ou recherche texte. Ailleurs, il propose de créer une tâche depuis un ticket. |
+| **Page « Jira »** (barre latérale) | Toutes les tâches liées à un ticket, avec les deux statuts côte à côte. Le filtre **Écarts** fait ressortir un ticket terminé dont la tâche est encore ouverte, ou une tâche terminée dont le ticket est encore ouvert. Elle s'appuie sur les liens détectés par Paperclip : URL collée dans une tâche, un commentaire ou le document `jira`. |
+| **Créer une tâche depuis un ticket** | Depuis la page Jira ou le bouton du haut : une clé, une URL, une recherche, ou **Mes tickets assignés** (non terminés). La tâche est créée avec le titre `[ABC-123] résumé`, la description du ticket convertie en markdown et le lien en tête : la pastille de statut apparaît aussitôt. Un ticket déjà lié à une tâche est signalé avant de créer un doublon. |
+| **Mode classique** | L'onglet **Jira** et le bouton **« Lier à Jira »** de la page tâche restent disponibles quand l'interface classique des tâches est activée. |
 | **Outil agent `get_issue`** | Un agent lit un ticket par sa clé, ou tous les tickets d'une tâche par l'`issueId` de celle-ci. Il n'a besoin d'aucun accès direct à Jira. |
 | **Fraîcheur** | Le statut est mis en cache 5 min (1 h pour un ticket terminé) et considéré comme périmé après 30 min. Le rafraîchissement se fait par lot, avec une seule requête JQL `key in (...)` pour 50 tickets. |
 
@@ -49,6 +51,18 @@ paperclipai plugin install --local "$PWD"
 
 Le chemin du dossier est obligatoire (sinon : `error: missing required argument 'package'`). Lancez la commande avec un compte qui a l'accès board : un agent reçoit `403 Board access required`.
 
+### Mettre à jour
+
+Quand une nouvelle version ajoute des capacités, l'hôte (2026.1023) refuse la mise à jour en place. Désinstallez sans `--force`, ce qui **conserve la configuration**, puis réinstallez :
+
+```bash
+npm run check
+paperclipai plugin uninstall theodoreriant.jira-link
+paperclipai plugin install --local "$PWD"
+```
+
+Rechargez ensuite la page de Paperclip dans le navigateur.
+
 ## Configuration
 
 1. Créez un jeton d'API Atlassian sur [id.atlassian.com → Sécurité → Jetons d'API](https://id.atlassian.com/manage-profile/security/api-tokens). De préférence, utilisez un compte de service qui ne peut que *parcourir* les projets concernés : le plugin ne voit que ce que ce compte voit.
@@ -63,9 +77,9 @@ La configuration se fait par société : chaque société Paperclip peut pointer
 
 ## Capacités demandées
 
-`external.objects.detect`, `external.objects.read`, `external.objects.refresh`, `http.outbound`, `secrets.read-ref`, `issues.read`, `issue.documents.read`, `agent.tools.register`, `ui.detailTab.register`, `ui.action.register`.
+`external.objects.detect`, `external.objects.read`, `external.objects.refresh`, `http.outbound`, `secrets.read-ref`, `issues.read`, `issue.documents.read`, `agent.tools.register`, `ui.detailTab.register`, `ui.action.register`, `ui.page.register`, `ui.sidebar.register`.
 
-Le plugin ne demande aucune capacité d'écriture : l'écriture du document `jira` passe par la session de l'utilisateur, avec ses propres droits.
+Le plugin ne demande aucune capacité d'écriture : l'écriture du document `jira` et la création de tâche passent par la session de l'utilisateur, avec ses propres droits. La page Jira lit les liens via l'API de Paperclip (`GET /api/companies/:id/issues`, `POST /api/companies/:id/issues/external-object-summaries`), avec les mêmes droits.
 
 ## Développement
 
@@ -77,20 +91,26 @@ npm run build          # dist/manifest.js, dist/worker.js, dist/ui/index.js
 
 ```
 src/
-  manifest.ts      manifeste (provider `jira`, outil, onglet, bouton)
+  manifest.ts      manifeste (provider `jira`, outil, emplacements d'UI)
   worker.ts        détection, résolution, rafraîchissement, actions UI, outil agent
   jira-client.ts   client REST Jira Cloud v3 (lecture seule)
   jira-url.ts      reconnaissance des clés et URL de tickets
   links.ts         lecture/écriture du document `jira`
   status.ts        correspondance statuts Jira → Paperclip
-  ui/index.tsx     onglet « Jira » et bouton « Lier à Jira »
+  adf.ts           description Jira (Atlassian Document Format) → markdown
+  import.ts        titre et description d'une tâche créée depuis un ticket
+  overview.ts      page Jira : rapprochement tâches ↔ tickets, écarts de statut
+  ui/index.tsx     bouton du haut, page et lien latéral, onglet et bouton classiques
 tests/
 ```
 
-## Limites connues (v1)
+## Limites connues
 
 - **Jira Cloud uniquement** : pas de Data Center ou Server (PAT, API v2).
-- **Lecture seule** : pas de transition de statut, pas de commentaires croisés, pas de création de ticket depuis une tâche.
+- **Lecture seule côté Jira** : pas de transition de statut, pas de commentaires croisés, pas de création de ticket depuis une tâche.
+- La page Jira analyse les 1 000 tâches les plus récentes de la société.
+- Les pièces jointes d'un ticket ne sont pas reprises dans la tâche créée.
+- Le bouton du haut lit la tâche ouverte dans l'URL (`/<préfixe>/issues/<ID>`) : l'hôte ne transmet pas la tâche courante à cet emplacement.
 - L'identifiant stable d'un ticket est sa **clé**. Un ticket déplacé dans un autre projet change de clé : il apparaîtra « Introuvable » jusqu'à ce que le lien soit mis à jour.
 - Le sprint n'est pas affiché : son champ (`customfield_*`) varie d'un site Jira à l'autre.
 - L'authentification se fait par e-mail et jeton d'API, pas encore en OAuth 3LO.

@@ -4,14 +4,15 @@ export const PLUGIN_ID = "theodoreriant.jira-link";
 export const PROVIDER_KEY = "jira";
 export const OBJECT_TYPE = "issue";
 export const TOOL_GET_ISSUE = "get_issue";
+export const JIRA_PAGE_ROUTE = "jira";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.2.0",
   displayName: "Jira link",
   description:
-    "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut sur les liens Jira, onglet Jira et outil de lecture pour les agents. Lecture seule.",
+    "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
   author: "Théodore Riant",
   categories: ["connector"],
   capabilities: [
@@ -25,6 +26,8 @@ const manifest: PaperclipPluginManifestV1 = {
     "agent.tools.register",
     "ui.detailTab.register",
     "ui.action.register",
+    "ui.page.register",
+    "ui.sidebar.register",
   ],
   entrypoints: {
     worker: "./dist/worker.js",
@@ -95,6 +98,26 @@ const manifest: PaperclipPluginManifestV1 = {
         displayName: "Lier à Jira",
         exportName: "JiraToolbarButton",
         entityTypes: ["issue"],
+      },
+      // Visibles quel que soit le mode d'affichage des tâches (chat ou classique).
+      {
+        type: "globalToolbarButton",
+        id: "jira-global-button",
+        displayName: "Jira",
+        exportName: "JiraGlobalButton",
+      },
+      {
+        type: "sidebar",
+        id: "jira-sidebar",
+        displayName: "Jira",
+        exportName: "JiraSidebarLink",
+      },
+      {
+        type: "page",
+        id: "jira-page",
+        displayName: "Jira",
+        exportName: "JiraPage",
+        routePath: JIRA_PAGE_ROUTE,
       },
     ],
   },

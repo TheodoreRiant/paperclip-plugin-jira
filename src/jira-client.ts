@@ -47,6 +47,8 @@ export const ISSUE_FIELDS = ["summary", "status", "issuetype", "assignee", "prio
 /** Taille de lot pour `key in (...)` : reste loin des limites de longueur JQL. */
 export const SEARCH_BATCH_SIZE = 50;
 
+export const ASSIGNED_TO_ME_JQL = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
+
 export class JiraClient {
   private readonly authHeader: string;
 
@@ -93,6 +95,20 @@ export class JiraClient {
   async searchText(text: string, maxResults = 10): Promise<JiraIssueSummary[]> {
     const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     return this.searchJql(`text ~ "${escaped}" ORDER BY updated DESC`, maxResults);
+  }
+
+  /** Tickets non terminés assignés au compte du jeton, les plus récents d'abord. */
+  async assignedToMe(maxResults = 30): Promise<JiraIssueSummary[]> {
+    return this.searchJql(ASSIGNED_TO_ME_JQL, maxResults);
+  }
+
+  /** Ticket avec sa description (document ADF brut), pour créer une tâche. */
+  async getIssueWithDescription(key: string): Promise<{ issue: JiraIssueSummary; description: unknown }> {
+    const query = new URLSearchParams({ fields: [...ISSUE_FIELDS, "description"].join(",") });
+    const body = (await this.request("GET", `/rest/api/3/issue/${encodeURIComponent(key)}?${query}`)) as {
+      fields?: { description?: unknown };
+    };
+    return { issue: this.toSummary(body), description: body?.fields?.description ?? null };
   }
 
   private async searchJql(jql: string, maxResults: number): Promise<JiraIssueSummary[]> {

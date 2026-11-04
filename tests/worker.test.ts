@@ -3,7 +3,12 @@ import { createTestHarness, type TestHarness } from "@paperclipai/plugin-sdk/tes
 import type { Issue } from "@paperclipai/plugin-sdk";
 import type { PluginExternalObjectRecordSnapshot, PluginExternalObjectUrlCandidate } from "@paperclipai/plugin-sdk";
 import manifest from "../src/manifest.js";
-import plugin, { type IssueLinksData, type LinkDocumentChange } from "../src/worker.js";
+import plugin, {
+  type ImportedTaskDraft,
+  type IssueLinksData,
+  type LinkDocumentChange,
+  type TicketsData,
+} from "../src/worker.js";
 import { LINKS_DOCUMENT_KEY, renderLinksDocument } from "../src/links.js";
 
 const COMPANY = "company-1";
@@ -22,6 +27,8 @@ interface FakeJiraIssue {
   summary: string;
   status: string;
   category: "new" | "indeterminate" | "done";
+  assignedToMe?: boolean;
+  description?: unknown;
 }
 
 class FakeJira {
@@ -48,7 +55,11 @@ class FakeJira {
     const single = /^\/rest\/api\/3\/issue\/([^/]+)$/.exec(url.pathname);
     if (single?.[1]) {
       const issue = this.issues.get(decodeURIComponent(single[1]));
-      return issue ? json(200, this.toJson(issue)) : json(404, { errorMessages: ["Issue does not exist"] });
+      if (!issue) return json(404, { errorMessages: ["Issue does not exist"] });
+      const body = this.toJson(issue);
+      const fields = url.searchParams.get("fields")?.split(",") ?? [];
+      if (fields.includes("description")) Object.assign(body.fields, { description: issue.description ?? null });
+      return json(200, body);
     }
 
     if (url.pathname === "/rest/api/3/search/jql" && init?.method === "POST") {
@@ -60,6 +71,10 @@ class FakeJira {
           return json(400, { errorMessages: ["The value does not exist for the field 'key'."] });
         }
         return json(200, { issues: keys.flatMap((k) => (this.issues.has(k) ? [this.toJson(this.issues.get(k)!)] : [])) });
+      }
+      if (body.jql.startsWith("assignee = currentUser()")) {
+        const mine = [...this.issues.values()].filter((i) => i.assignedToMe && i.category !== "done");
+        return json(200, { issues: mine.map((i) => this.toJson(i)) });
       }
       const text = /^text ~ "(.*)" ORDER BY updated DESC$/.exec(body.jql)?.[1] ?? "";
       const matches = [...this.issues.values()].filter((i) => i.summary.toLowerCase().includes(text.toLowerCase()));
@@ -425,5 +440,61 @@ describe("tester la connexion", () => {
     jira.authStatus = 401;
     const result = await def.onValidateConfig!(CONFIG);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("page Jira", () => {
+  it("relit le statut détaillé des tickets listés, clés normalisées et dédoublonnées", async () => {
+    const data = await harness.getData<TicketsData>("tickets", { companyId: COMPANY, keys: ["abc-1", "ABC-1", "ABC-2", "pas une clé"] });
+    expect(data.configured).toBe(true);
+    expect(Object.keys(data.tickets).sort()).toEqual(["ABC-1", "ABC-2"]);
+    expect(data.tickets["ABC-2"]).toMatchObject({ issue: { statusName: "Terminé" } });
+    expect(jira.calls.filter((c) => c.startsWith("POST"))).toHaveLength(1);
+  });
+
+  it("ne contacte pas Jira quand la liste est vide", async () => {
+    const data = await harness.getData<TicketsData>("tickets", { companyId: COMPANY, keys: [] });
+    expect(data.tickets).toEqual({});
+    expect(jira.calls).toEqual([]);
+  });
+
+  it("signale une configuration manquante", async () => {
+    await setupHarness({ siteUrl: SITE });
+    const data = await harness.getData<TicketsData>("tickets", { companyId: COMPANY, keys: ["ABC-1"] });
+    expect(data.configured).toBe(false);
+  });
+});
+
+describe("créer une tâche depuis un ticket", () => {
+  it("liste mes tickets assignés non terminés", async () => {
+    jira.issues.get("ABC-1")!.assignedToMe = true;
+    jira.issues.get("ABC-2")!.assignedToMe = true; // terminé : exclu
+    const mine = await harness.performAction<{ results: Array<{ key: string }> }>("my-tickets", {}, { companyId: COMPANY });
+    expect(mine.results.map((r) => r.key)).toEqual(["ABC-1"]);
+  });
+
+  it("prépare titre et description, avec l'URL du ticket en tête", async () => {
+    jira.issues.get("ABC-1")!.description = {
+      type: "doc",
+      content: [{ type: "paragraph", content: [{ type: "text", text: "Le bouton ne répond pas." }] }],
+    };
+    const draft = await harness.performAction<ImportedTaskDraft>(
+      "prepare-import",
+      { input: `${SITE}/browse/abc-1` },
+      { companyId: COMPANY },
+    );
+    expect(draft.key).toBe("ABC-1");
+    expect(draft.title).toBe("[ABC-1] Écran de connexion");
+    expect(draft.description.startsWith(`Ticket Jira : [ABC-1](${SITE}/browse/ABC-1)`)).toBe(true);
+    expect(draft.description).toContain("Le bouton ne répond pas.");
+  });
+
+  it("refuse une saisie invalide ou un ticket inexistant", async () => {
+    await expect(harness.performAction("prepare-import", { input: "bonjour" }, { companyId: COMPANY })).rejects.toThrow(
+      /ni une clé Jira/,
+    );
+    await expect(harness.performAction("prepare-import", { input: "ABC-999" }, { companyId: COMPANY })).rejects.toThrow(
+      /introuvable/,
+    );
   });
 });

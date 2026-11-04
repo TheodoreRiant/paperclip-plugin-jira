@@ -8,7 +8,9 @@ import {
 } from "@paperclipai/plugin-sdk";
 import { parseConfig, type JiraConfig } from "./config.js";
 import { JiraClient, JiraError, type FetchLike, type JiraIssueSummary } from "./jira-client.js";
-import { issueKeyFromInput, issueKeyFromUrl } from "./jira-url.js";
+import { issueKeyFromInput, issueKeyFromUrl, normalizeIssueKey } from "./jira-url.js";
+import { adfToMarkdown } from "./adf.js";
+import { draftTaskFromTicket, type ImportedTaskDraft } from "./import.js";
 import {
   LINKS_DOCUMENT_KEY,
   LINKS_DOCUMENT_TITLE,
@@ -48,6 +50,22 @@ export interface LinkDocumentChange {
   documentTitle: string;
   documentBody: string | null;
   baseRevisionId: string | null;
+}
+
+export interface TicketsData {
+  configured: boolean;
+  configErrors: string[];
+  siteUrl: string | null;
+  tickets: Record<string, TicketView>;
+}
+
+export type { ImportedTaskDraft };
+
+/** Borne le nombre de tickets relus par affichage de la page. */
+export const MAX_PAGE_KEYS = 500;
+
+function isString(value: string | null): value is string {
+  return value !== null;
 }
 
 let pluginCtx: PluginContext | null = null;
@@ -254,6 +272,46 @@ const plugin = definePlugin({
         documentBody: next.length > 0 ? renderLinksDocument(config.siteUrl, next) : null,
         baseRevisionId: revisionId,
       };
+    });
+
+    // ── Page « Jira » : statut détaillé des tickets listés ────────────────
+    context.data.register("tickets", async (params): Promise<TicketsData> => {
+      const companyId = requireString(params, "companyId");
+      const rawKeys = Array.isArray(params.keys) ? params.keys : [];
+      const parsed = parseConfig(await context.config.get(companyId));
+      if (!parsed.ok) return { configured: false, configErrors: parsed.errors, siteUrl: null, tickets: {} };
+      const keys = [
+        ...new Set(rawKeys.flatMap((k) => (typeof k === "string" ? [normalizeIssueKey(k)] : [])).filter(isString)),
+      ].slice(0, MAX_PAGE_KEYS);
+      const { client, config } = await clientFor(companyId, parsed.config);
+      const views = await fetchTickets(client, config.siteUrl, keys);
+      return { configured: true, configErrors: [], siteUrl: config.siteUrl, tickets: Object.fromEntries(views) };
+    });
+
+    // ── Import : mes tickets assignés ────────────────────────────────────
+    context.actions.register("my-tickets", async (params, actionContext) => {
+      const companyId = actionContext.companyId ?? requireString(params, "companyId");
+      const { client } = await clientFor(companyId);
+      try {
+        return { results: await client.assignedToMe() };
+      } catch (err) {
+        throw new Error(describeError(err));
+      }
+    });
+
+    // ── Import : contenu de la tâche à créer depuis un ticket ────────────
+    context.actions.register("prepare-import", async (params, actionContext): Promise<ImportedTaskDraft> => {
+      const companyId = actionContext.companyId ?? requireString(params, "companyId");
+      const input = requireString(params, "input");
+      const { client, config } = await clientFor(companyId);
+      const key = issueKeyFromInput(input, config.siteHost);
+      if (!key) throw new Error(`« ${input} » n'est ni une clé Jira (ex. ABC-123) ni une URL de ${config.siteHost}.`);
+      try {
+        const { issue, description } = await client.getIssueWithDescription(key);
+        return draftTaskFromTicket(issue, adfToMarkdown(description));
+      } catch (err) {
+        throw new Error(describeError(err));
+      }
     });
 
     // ── Outil agent ──────────────────────────────────────────────────────
