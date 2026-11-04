@@ -44,8 +44,10 @@ git clone https://github.com/TheodoreRiant/paperclip-plugin-jira.git
 cd paperclip-plugin-jira
 npm install
 npm run check          # typecheck + tests + build
-paperclipai plugin install "$PWD"
+paperclipai plugin install --local "$PWD"
 ```
+
+Le chemin du dossier est obligatoire (sinon : `error: missing required argument 'package'`). Lancez la commande avec un compte qui a l'accès board : un agent reçoit `403 Board access required`.
 
 ## Configuration
 
