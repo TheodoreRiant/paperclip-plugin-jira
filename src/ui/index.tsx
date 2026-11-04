@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { RefreshCw, Ticket, TriangleAlert, Unlink, UserRound } from "lucide-react";
+import { Ellipsis, ExternalLink, Plus, RefreshCw, Ticket, TriangleAlert, Unlink, UserRound } from "lucide-react";
 import {
   DataTable,
   Spinner,
@@ -36,6 +36,7 @@ import {
   ErrorNotice,
   ExternalKey,
   FilterChip,
+  HostDialog,
   Muted,
   SectionHeader,
   TaskStatusGlyph,
@@ -164,24 +165,56 @@ function Loading({ label }: { label: string }) {
 
 // ── Ticket lié ──────────────────────────────────────────────────────────
 
-function TicketRow({ view, onUnlink, busy }: { view: TicketView; onUnlink?: () => void; busy?: boolean }) {
+/** Ticket d'une tâche, qu'il soit lié par le plugin ou cité dans son titre ou sa description. */
+export interface TaskTicket {
+  view: TicketView;
+  /** `document` : lié via le plugin (déliable) ; `description` : URL dans le titre ou la description. */
+  source: "document" | "description";
+}
+
+/** Tous les tickets d'une tâche, liens explicites d'abord. */
+export function taskTickets(data: IssueLinksData | null | undefined): TaskTicket[] {
+  if (!data?.configured) return [];
+  return [
+    ...data.linked.map((view) => ({ view, source: "document" as const })),
+    ...data.mentioned.map((view) => ({ view, source: "description" as const })),
+  ];
+}
+
+/**
+ * Fiche d'un ticket de la tâche, avec ses seules actions utiles : l'ouvrir
+ * dans Jira, et le délier s'il a été lié par le plugin (un ticket cité dans la
+ * description se retire en modifiant la description).
+ */
+function TicketCard({ ticket, onUnlink, busy }: { ticket: TaskTicket; onUnlink?: () => void; busy?: boolean }) {
+  const { view, source } = ticket;
   const issue = view.issue;
   const meta = issue
     ? [issue.issueType, issue.priority && `Priorité ${issue.priority}`, `Assigné : ${issue.assignee ?? "personne"}`].filter(Boolean).join(" · ")
     : null;
   return (
-    <div className="flex flex-col gap-1 rounded-md border border-border px-3 py-2">
+    <div className="flex flex-col gap-2 rounded-md border border-border px-3 py-2">
       <div className="flex min-w-0 items-center gap-2">
         <ExternalKey href={view.url}>{view.key}</ExternalKey>
-        <span className="min-w-0 flex-1 truncate text-sm">{issue?.summary ?? ""}</span>
+        <span className="min-w-0 flex-1 truncate text-sm" title={issue?.summary}>
+          {issue?.summary ?? ""}
+        </span>
         {issue ? <JiraIssueStatus issue={issue} /> : <TicketStatus category="unknown" label={view.error ?? "Introuvable"} />}
-        {onUnlink ? (
-          <Button variant="ghost" size="icon-xs" onClick={onUnlink} disabled={busy} title="Délier" aria-label={`Délier ${view.key}`}>
-            {busy ? <Spinner label="Délien…" /> : <Unlink aria-hidden="true" />}
-          </Button>
-        ) : null}
       </div>
       {meta ? <p className="text-xs text-muted-foreground">{meta}</p> : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <a href={view.url} target="_blank" rel="noopener noreferrer" className={buttonClass("outline", "xs")}>
+          <ExternalLink aria-hidden="true" />
+          Ouvrir dans Jira
+        </a>
+        {source === "document" && onUnlink ? (
+          <Button variant="ghost" size="xs" onClick={onUnlink} disabled={busy} aria-label={`Délier ${view.key}`}>
+            {busy ? <Spinner label="Délien…" /> : <Unlink aria-hidden="true" />}
+            Délier
+          </Button>
+        ) : null}
+        {source === "description" ? <span className="text-xs text-muted-foreground">Cité dans la description de la tâche</span> : null}
+      </div>
     </div>
   );
 }
@@ -431,12 +464,26 @@ function NotConfigured({ errors }: { errors: string[] }) {
   );
 }
 
-/** Tickets liés à une tâche + formulaire de liaison. Utilisé par l'onglet et par les boutons Jira. */
-function IssueJiraPanel({ companyId, issueId }: { companyId: string; issueId: string }) {
-  const { data, loading, error, refresh } = usePluginData<IssueLinksData>("issue-links", { companyId, issueId });
+interface IssueLinksState {
+  data: IssueLinksData | null;
+  loading: boolean;
+  error: { message: string } | null;
+  refresh: () => void;
+}
+
+/**
+ * Tickets d'une tâche et actions associées, partagé par l'onglet (mode
+ * classique) et la fenêtre du bouton « Jira ». Les actions suivent l'état :
+ * - aucun ticket : la recherche est l'action principale, ouverte d'emblée ;
+ * - au moins un ticket : chaque fiche propose « Ouvrir dans Jira » et
+ *   « Délier » ; lier un ticket de plus reste possible mais replié.
+ */
+function IssueJiraContent({ companyId, issueId, state }: { companyId: string; issueId: string; state: IssueLinksState }) {
+  const { data, loading, error, refresh } = state;
   const prepareUnlink = usePluginAction("prepare-unlink");
   const toast = usePluginToast();
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [addingAnother, setAddingAnother] = useState(false);
 
   async function unlink(key: string) {
     setBusyKey(key);
@@ -457,32 +504,67 @@ function IssueJiraPanel({ companyId, issueId }: { companyId: string; issueId: st
   if (!data) return null;
   if (!data.configured) return <NotConfigured errors={data.configErrors} />;
 
-  return (
-    <div className="flex flex-col gap-4">
-      <section className="flex flex-col gap-2">
-        <SectionHeader>Tickets liés</SectionHeader>
-        {data.linked.length === 0 && data.mentioned.length === 0 ? (
-          <Muted>Aucun ticket lié pour l'instant.</Muted>
-        ) : (
-          data.linked.map((view) => (
-            <TicketRow key={view.key} view={view} busy={busyKey === view.key} onUnlink={() => unlink(view.key)} />
-          ))
-        )}
-      </section>
-      {data.mentioned.length > 0 ? (
-        <section className="flex flex-col gap-2">
-          <SectionHeader>Cités dans la tâche</SectionHeader>
-          {data.mentioned.map((view) => (
-            <TicketRow key={view.key} view={view} />
-          ))}
-        </section>
-      ) : null}
+  const tickets = taskTickets(data);
+
+  if (tickets.length === 0) {
+    return (
       <section className="flex flex-col gap-2">
         <SectionHeader>Lier un ticket</SectionHeader>
         <LinkForm companyId={companyId} issueId={issueId} onLinked={refresh} />
+        <Muted className="text-xs">Coller l'URL d'un ticket dans la description de la tâche le lie aussi.</Muted>
       </section>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <section className="flex flex-col gap-2">
+        <SectionHeader>{tickets.length > 1 ? "Tickets liés" : "Ticket lié"}</SectionHeader>
+        {tickets.map((ticket) => (
+          <TicketCard
+            key={ticket.view.key}
+            ticket={ticket}
+            busy={busyKey === ticket.view.key}
+            onUnlink={() => void unlink(ticket.view.key)}
+          />
+        ))}
+      </section>
+      {addingAnother ? (
+        <section className="flex flex-col gap-2">
+          <SectionHeader
+            trailing={
+              <Button variant="ghost" size="xs" onClick={() => setAddingAnother(false)}>
+                Annuler
+              </Button>
+            }
+          >
+            Lier un autre ticket
+          </SectionHeader>
+          <LinkForm
+            companyId={companyId}
+            issueId={issueId}
+            onLinked={() => {
+              setAddingAnother(false);
+              refresh();
+            }}
+          />
+        </section>
+      ) : (
+        <div>
+          <Button variant="ghost" size="xs" onClick={() => setAddingAnother(true)}>
+            <Plus aria-hidden="true" />
+            Lier un autre ticket
+          </Button>
+        </div>
+      )}
     </div>
   );
+}
+
+/** Onglet « Jira » : lit lui-même les tickets de la tâche. */
+function IssueJiraPanel({ companyId, issueId }: { companyId: string; issueId: string }) {
+  const state = usePluginData<IssueLinksData>("issue-links", { companyId, issueId });
+  return <IssueJiraContent companyId={companyId} issueId={issueId} state={state} />;
 }
 
 // ── Création d'une tâche depuis un ticket Jira ──────────────────────────
@@ -619,19 +701,17 @@ export function JiraTab({ context }: PluginDetailTabProps) {
   return <IssueJiraPanel companyId={context.companyId ?? ""} issueId={context.entityId} />;
 }
 
-// ── Fenêtres ouvertes par les boutons « Jira » ──────────────────────────
+// ── Bouton « Jira » de la barre du haut ─────────────────────────────────
 //
-// Les boutons sont des « launchers » déclarés dans le manifeste : Paperclip
-// dessine lui-même le bouton (comme ses autres boutons de barre d'outils) et
-// la fenêtre (en-tête, bouton Close, Échap, clic à côté). Le plugin ne fournit
-// que le contenu.
-
-/** Bouton « Jira » de la page d'une tâche (mode classique). */
-export function JiraIssueLauncher() {
-  const host = useHostContext();
-  if (!host.companyId || !host.entityId) return <Muted>Ouvrez une tâche pour gérer ses tickets Jira.</Muted>;
-  return <IssueJiraPanel companyId={host.companyId} issueId={host.entityId} />;
-}
+// Slot `globalToolbarButton` (et non launcher) : un launcher a un libellé fixe
+// alors que ce bouton suit la tâche affichée. Il reprend le rendu des boutons
+// de l'hôte dans cette barre (`Button` outline, `h-8`), et sa fenêtre reprend
+// la coque des fenêtres de launcher (`HostDialog`).
+//
+// - Hors tâche : « Jira » → créer une tâche depuis un ticket.
+// - Tâche sans ticket : « Jira » → lier un ticket.
+// - Tâche avec ticket(s) : « ABC-123 ↗ » ouvre le ticket dans Jira ; le bouton
+//   « ⋯ » à côté ouvre la gestion (ouvrir, délier, lier un autre ticket).
 
 interface ResolvedTask {
   id: string;
@@ -639,26 +719,18 @@ interface ResolvedTask {
   title: string;
 }
 
-/**
- * Bouton « Jira » de la barre du haut, visible quel que soit le mode. L'hôte
- * ne transmet à cet emplacement que la société : la tâche ouverte est lue dans
- * l'URL (`/<préfixe>/issues/<ID>`). Sur une tâche : tickets liés, lier,
- * délier. Ailleurs : créer une tâche depuis un ticket.
- */
-export function JiraGlobalLauncher() {
-  const host = useHostContext();
+/** La tâche affichée, lue dans l'URL : l'hôte ne transmet que la société à cet emplacement. */
+function useCurrentTask(): { taskRef: string | null; task: ResolvedTask | null; taskError: string | null } {
   const { pathname } = useHostLocation();
-  const navigation = useHostNavigation();
-  const companyId = host.companyId ?? "";
   const taskRef = taskRefFromPath(pathname);
   const [task, setTask] = useState<ResolvedTask | null>(null);
   const [taskError, setTaskError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!taskRef) return;
-    let cancelled = false;
     setTask(null);
     setTaskError(null);
+    if (!taskRef) return;
+    let cancelled = false;
     hostJson<ResolvedTask>(`/api/issues/${encodeURIComponent(taskRef)}`)
       .then((t) => !cancelled && setTask(t))
       .catch((err) => !cancelled && setTaskError(errorText(err)));
@@ -667,8 +739,88 @@ export function JiraGlobalLauncher() {
     };
   }, [taskRef]);
 
-  if (!companyId) return <Muted>Choisissez une société.</Muted>;
+  return { taskRef, task, taskError };
+}
 
+const IDLE_LINKS: IssueLinksState = { data: null, loading: false, error: null, refresh: () => {} };
+
+export function JiraToolbarButton() {
+  const host = useHostContext();
+  const companyId = host.companyId ?? "";
+  const { taskRef, task, taskError } = useCurrentTask();
+  const [open, setOpen] = useState(false);
+  // Sans tâche résolue, pas de lecture Jira (paramètres vides : le worker répond « rien »).
+  const links = usePluginData<IssueLinksData>("issue-links", task ? { companyId, issueId: task.id } : { companyId });
+  const linksState: IssueLinksState = task ? links : IDLE_LINKS;
+  const tickets = taskTickets(linksState.data);
+
+  if (!companyId) return null;
+
+  return (
+    <>
+      <JiraToolbarTrigger tickets={tickets} onOpen={() => setOpen(true)} />
+      {open ? (
+        <HostDialog title={taskRef ? "Jira" : "Créer une tâche depuis Jira"} onClose={() => setOpen(false)}>
+          <JiraDialogBody companyId={companyId} taskRef={taskRef} task={task} taskError={taskError} links={linksState} />
+        </HostDialog>
+      ) : null}
+    </>
+  );
+}
+
+/** Rendu du bouton selon les tickets de la tâche affichée. Exporté pour les tests de rendu. */
+export function JiraToolbarTrigger({ tickets, onOpen }: { tickets: TaskTicket[]; onOpen: () => void }) {
+  const primary = tickets[0]?.view;
+  return (
+    <div className="flex items-center gap-1">
+      {primary ? (
+        <>
+          <a
+            href={primary.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={buttonClass("outline", "toolbar")}
+            title={`Ouvrir ${primary.key} dans Jira${primary.issue ? ` — ${primary.issue.statusName}` : ""}`}
+          >
+            <span className="font-mono text-xs">{primary.key}</span>
+            {tickets.length > 1 ? <span className="text-xs text-muted-foreground">+{tickets.length - 1}</span> : null}
+            <ExternalLink aria-hidden="true" />
+          </a>
+          <Button
+            variant="outline"
+            size="icon-toolbar"
+            onClick={onOpen}
+            title="Tickets Jira de la tâche"
+            aria-label="Tickets Jira de la tâche"
+            aria-haspopup="dialog"
+          >
+            <Ellipsis aria-hidden="true" />
+          </Button>
+        </>
+      ) : (
+        <Button variant="outline" size="toolbar" onClick={onOpen} aria-haspopup="dialog">
+          Jira
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/** Contenu de la fenêtre du bouton « Jira ». Exporté pour les tests de rendu. */
+export function JiraDialogBody({
+  companyId,
+  taskRef,
+  task,
+  taskError,
+  links,
+}: {
+  companyId: string;
+  taskRef: string | null;
+  task: ResolvedTask | null;
+  taskError: string | null;
+  links: IssueLinksState;
+}) {
+  const navigation = useHostNavigation();
   return (
     <div className="flex flex-col gap-4">
       {taskRef ? (
@@ -680,16 +832,13 @@ export function JiraGlobalLauncher() {
               <span className="shrink-0 font-mono text-xs text-muted-foreground">{task.identifier ?? taskRef}</span>
               <span className="truncate">{task.title}</span>
             </p>
-            <IssueJiraPanel companyId={companyId} issueId={task.id} />
+            <IssueJiraContent companyId={companyId} issueId={task.id} state={links} />
           </>
         ) : (
           <Loading label="Chargement de la tâche…" />
         )
       ) : (
-        <section className="flex flex-col gap-2">
-          <SectionHeader>Créer une tâche depuis un ticket</SectionHeader>
-          <ImportForm companyId={companyId} />
-        </section>
+        <ImportForm companyId={companyId} />
       )}
       <div className="flex justify-end border-t border-border pt-3">
         <a {...navigation.linkProps(`/${JIRA_ROUTE}`)} className={buttonClass("ghost", "xs")}>

@@ -9,7 +9,7 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.3.1",
+  version: "0.4.0",
   displayName: "Jira link",
   description:
     "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) et outil de lecture pour les agents. Lecture seule côté Jira.",
@@ -105,29 +105,16 @@ const manifest: PaperclipPluginManifestV1 = {
         exportName: "JiraPage",
         routePath: JIRA_PAGE_ROUTE,
       },
-    ],
-    // Boutons « Jira » : Paperclip dessine le bouton et la fenêtre (en-tête,
-    // fermeture, Échap) avec ses propres composants ; le plugin fournit le contenu.
-    launchers: [
       {
-        // Barre du haut : visible quel que soit le mode d'affichage des tâches.
-        // Modale centrée et non popover : l'hôte (2026.1023) place un popover à
-        // `left ≤ largeur fenêtre − 360px` quelle que soit sa largeur réelle
-        // (40rem en `default`), ce qui le fait déborder à droite de l'écran.
-        id: "jira-global",
+        // Bouton « Jira » de la barre du haut, visible quel que soit le mode
+        // d'affichage des tâches. Slot et non launcher : un launcher a un
+        // libellé fixe, alors que ce bouton devient « ABC-123 ↗ » (ouvrir dans
+        // Jira) quand la tâche affichée a un ticket. Il remplace aussi l'ancien
+        // bouton de la page d'une tâche, qui faisait doublon.
+        type: "globalToolbarButton",
+        id: "jira-toolbar",
         displayName: "Jira",
-        placementZone: "globalToolbarButton",
-        action: { type: "openModal", target: "JiraGlobalLauncher" },
-        render: { environment: "hostOverlay", bounds: "default" },
-      },
-      {
-        // Page d'une tâche (mode classique).
-        id: "jira-issue",
-        displayName: "Jira",
-        placementZone: "toolbarButton",
-        entityTypes: ["issue"],
-        action: { type: "openModal", target: "JiraIssueLauncher" },
-        render: { environment: "hostOverlay", bounds: "default" },
+        exportName: "JiraToolbarButton",
       },
     ],
   },

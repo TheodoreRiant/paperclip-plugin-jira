@@ -454,6 +454,11 @@ describe("onglet Jira", () => {
     expect(data.mentioned).toMatchObject([{ key: "ABC-7", issue: { summary: "Erreur 500 à la connexion" } }]);
   });
 
+  it("sans tâche (bouton de la barre du haut hors tâche) : aucun ticket, sans erreur", async () => {
+    const data = await harness.getData<IssueLinksData>("issue-links", { companyId: COMPANY });
+    expect(data).toMatchObject({ configured: true, linked: [], mentioned: [] });
+  });
+
   it("explique la configuration manquante", async () => {
     await setupHarness({ siteUrl: SITE });
     const data = await harness.getData<IssueLinksData>("issue-links", { companyId: COMPANY, issueId: ISSUE_ID });

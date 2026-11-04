@@ -164,9 +164,13 @@ const plugin = definePlugin({
     // ── Données de l'onglet « Jira » ────────────────────────────────────
     context.data.register("issue-links", async (params): Promise<IssueLinksData> => {
       const companyId = requireString(params, "companyId");
-      const issueId = requireString(params, "issueId");
+      // Le bouton de la barre du haut interroge aussi hors tâche : pas de tâche, pas de ticket.
+      const issueId = typeof params.issueId === "string" ? params.issueId.trim() : "";
 
       const parsed = parseConfig(await context.config.get(companyId));
+      if (!issueId && parsed.ok) {
+        return { configured: true, configErrors: [], siteUrl: parsed.config.siteUrl, linked: [], mentioned: [], documentRevisionId: null };
+      }
       if (!parsed.ok) {
         return {
           configured: false,

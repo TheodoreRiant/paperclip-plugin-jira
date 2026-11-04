@@ -14,6 +14,9 @@
  */
 import {
   forwardRef,
+  useEffect,
+  useId,
+  useRef,
   type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
   type CSSProperties,
@@ -34,6 +37,7 @@ import {
   Search,
   type LucideIcon,
 } from "lucide-react";
+import { createPortal } from "react-dom";
 
 export function cn(...classes: Array<string | false | null | undefined>): string {
   return classes.filter(Boolean).join(" ");
@@ -59,6 +63,11 @@ const BUTTON_SIZES = {
   xs: "h-6 gap-1 rounded-md px-2 text-xs has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",
   "icon-xs": "size-6 rounded-md [&_svg:not([class*='size-'])]:size-3",
   "icon-sm": "size-9",
+  // Boutons de la barre du haut : l'hôte y rend `Button` en `sm` avec `h-8`
+  // (`launcherTriggerClassName`) ; sans tailwind-merge, `h-9` et `h-8`
+  // cohabiteraient, d'où une taille dédiée.
+  toolbar: "h-8 rounded-md gap-1.5 px-3 has-[>svg]:px-2.5",
+  "icon-toolbar": "size-8",
 } as const;
 
 export type ButtonVariant = keyof typeof BUTTON_VARIANTS;
@@ -171,6 +180,87 @@ export function FilterChip({ active, onClick, children }: { active: boolean; onC
     >
       {children}
     </button>
+  );
+}
+
+// ── Fenêtre (coque `LauncherModalShell` de l'hôte) ──────────────────────
+
+/** Niveau de pile des fenêtres de launcher de l'hôte (`1000`, +20 par fenêtre empilée). */
+const HOST_OVERLAY_Z = 1000;
+/** Largeur des fenêtres `bounds: "default"` de l'hôte. */
+const HOST_DIALOG_WIDTH = "min(40rem, calc(100vw - 2rem))";
+
+/** Seuls styles en ligne du plugin : ceux que l'hôte pose lui-même sur ses fenêtres. */
+export const HOST_DIALOG_STYLES: { backdrop: CSSProperties; dialog: CSSProperties } = {
+  backdrop: { zIndex: HOST_OVERLAY_Z },
+  dialog: { zIndex: HOST_OVERLAY_Z + 1, width: HOST_DIALOG_WIDTH },
+};
+
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Fenêtre centrée, reprise mot pour mot de celle que Paperclip ouvre pour un
+ * launcher `openModal` : voile, en-tête (titre, nom du plugin, « Close »),
+ * Échap, clic à côté, focus sur le premier élément. Rendue dans `document.body`
+ * pour échapper au débordement de la barre du haut.
+ */
+export function HostDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const first = ref.current?.querySelector<HTMLElement>(`[autofocus], ${FOCUSABLE}`);
+      (first ?? ref.current)?.focus();
+    });
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        closeRef.current();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  return createPortal(
+    <>
+      <div
+        className="fixed inset-0 bg-black/45"
+        style={HOST_DIALOG_STYLES.backdrop}
+        aria-hidden="true"
+        onMouseDown={(e) => e.target === e.currentTarget && closeRef.current()}
+      />
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="fixed left-1/2 top-1/2 max-h-[calc(100vh-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-2xl border border-border bg-background shadow-2xl"
+        style={HOST_DIALOG_STYLES.dialog}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 id={titleId} className="truncate text-sm font-semibold">
+              {title}
+            </h2>
+            <p className="truncate text-xs text-muted-foreground">Jira link</p>
+          </div>
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => closeRef.current()}>
+            Close
+          </Button>
+        </div>
+        <div className="overflow-auto p-4 max-h-[calc(100vh-7rem)]">{children}</div>
+      </div>
+    </>,
+    document.body,
   );
 }
 

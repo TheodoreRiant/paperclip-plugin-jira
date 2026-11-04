@@ -1,15 +1,13 @@
 import { describe, expect, it } from "vitest";
 import manifest from "../src/manifest.js";
 
-describe("launchers", () => {
-  it("n'utilisent pas openPopover (l'hôte le fait déborder de l'écran)", () => {
-    // Paperclip 2026.1023 place un popover à `left ≤ innerWidth − 360px`
-    // quelle que soit sa largeur (28 à 64rem selon `bounds`) : près du bord
-    // droit, il sort de l'écran. La modale centrée de l'hôte reste bornée.
-    const launchers = manifest.ui?.launchers ?? [];
-    expect(launchers.length).toBeGreaterThan(0);
-    for (const launcher of launchers) {
-      expect(launcher.action.type, launcher.id).toBe("openModal");
-    }
+describe("manifeste", () => {
+  it("bouton « Jira » de la barre du haut : slot dessiné par le plugin, pas launcher", () => {
+    // Un launcher a un libellé fixe ; le bouton doit devenir « ABC-123 ↗ »
+    // quand la tâche a un ticket. Et l'hôte (2026.1023) fait déborder les
+    // launchers `openPopover` de l'écran : aucun launcher n'est déclaré.
+    const slot = manifest.ui?.slots?.find((s) => s.type === "globalToolbarButton");
+    expect(slot?.exportName).toBe("JiraToolbarButton");
+    expect(manifest.ui?.launchers ?? []).toEqual([]);
   });
 });
