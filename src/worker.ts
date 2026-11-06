@@ -11,7 +11,7 @@ import { parseConfig, type JiraConfig } from "./config.js";
 import { JiraClient, JiraError, type FetchLike, type JiraIssueSummary } from "./jira-client.js";
 import { issueKeyFromInput, issueKeyFromUrl, normalizeIssueKey } from "./jira-url.js";
 import { adfToMarkdown } from "./adf.js";
-import { draftTaskFromTicket, type ImportedTaskDraft } from "./import.js";
+import { asPreferences, draftTaskFromTicket, type ImportedTaskDraft } from "./import.js";
 import {
   LINKS_DOCUMENT_KEY,
   LINKS_DOCUMENT_TITLE,
@@ -205,10 +205,12 @@ async function fetchTickets(client: JiraClient, siteUrl: string, keys: string[])
 
 const STATE_NS = "label-sync";
 const INDEX_NS = "ticket-index";
+const IMPORT_NS = "import";
 const registryKey = (companyId: string) => ({ scopeKind: "company" as const, scopeId: companyId, namespace: STATE_NS, stateKey: "registry" });
 const requestsKey = (companyId: string) => ({ scopeKind: "company" as const, scopeId: companyId, namespace: STATE_NS, stateKey: "requests" });
 const waitingKey = (companyId: string) => ({ scopeKind: "company" as const, scopeId: companyId, namespace: STATE_NS, stateKey: "waiting-issues" });
 const issueSyncKey = (issueId: string) => ({ scopeKind: "issue" as const, scopeId: issueId, namespace: STATE_NS, stateKey: "applied" });
+const prefsKey = (companyId: string) => ({ scopeKind: "company" as const, scopeId: companyId, namespace: IMPORT_NS, stateKey: "preferences" });
 const indexKey = (companyId: string, key: string) => ({ scopeKind: "company" as const, scopeId: companyId, namespace: INDEX_NS, stateKey: key });
 
 /** Nombre maximal de tâches resynchronisées par appel (page Jira, libellés créés). */
@@ -530,10 +532,30 @@ const plugin = definePlugin({
       if (!key) throw new Error(`« ${input} » n'est ni une clé Jira (ex. ABC-123) ni une URL de ${config.siteHost}.`);
       try {
         const { issue, description, details } = await client.getIssueForImport(key);
-        return draftTaskFromTicket(issue, adfToMarkdown(description), details, config.importCommand);
+        const draft = draftTaskFromTicket(issue, adfToMarkdown(description), details, config.importCommand);
+        draft.parentTaskIds = draft.parentKey ? stringArray(await context.state.get(indexKey(companyId, draft.parentKey))) : [];
+        draft.preferences = asPreferences(await context.state.get(prefsKey(companyId)));
+        return draft;
       } catch (err) {
         throw new Error(describeError(err));
       }
+    });
+
+    // ── Import : mémoriser les choix de la fiche (proposés la fois suivante) ─
+    context.actions.register("remember-import-choices", async (params, actionContext) => {
+      const companyId = actionContext.companyId ?? requireString(params, "companyId");
+      const preferences = asPreferences(params);
+      await context.state.set(prefsKey(companyId), preferences);
+      return preferences;
+    });
+
+    // ── Import : la tâche créée est indexée sous son ticket (tâche parente des suivants) ─
+    context.actions.register("index-created-task", async (params, actionContext) => {
+      const companyId = actionContext.companyId ?? requireString(params, "companyId");
+      const key = normalizeIssueKey(requireString(params, "key"));
+      if (!key) throw new Error("Clé Jira invalide.");
+      await addToIndex(companyId, key, requireString(params, "issueId"));
+      return { ok: true };
     });
 
     // ── Libellés : demandes de création (lues par l'interface) ───────────

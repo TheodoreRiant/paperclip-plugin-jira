@@ -31,7 +31,22 @@ import {
   type OverviewRow,
   type TaskLite,
 } from "../overview.js";
-import { labelColor, matchLabels, type HostLabel } from "../import.js";
+import {
+  assignableAgents,
+  defaultImportChoices,
+  goalForProject,
+  labelColor,
+  matchLabels,
+  projectBodyForSprint,
+  projectForSprint,
+  type HostAgent,
+  type HostGoal,
+  type HostLabel,
+  type HostProject,
+  type ImportChoices,
+  type ProjectChoice,
+  type TaskPriority,
+} from "../import.js";
 import {
   Button,
   COMMAND_ITEM_CLASS,
@@ -41,11 +56,13 @@ import {
   CommandList,
   CommandRoot,
   CommandShortcut,
+  EntityPicker,
   ErrorNotice,
   ExternalKey,
   FilterChip,
   HostDialog,
   Muted,
+  PropertyRow,
   SectionHeader,
   TaskStatusGlyph,
   TicketStatus,
@@ -128,16 +145,24 @@ interface CreatedTask {
   identifier: string | null;
 }
 
+/** Choix de la fiche de création, priorité comprise (modifiable). */
+export interface ImportSelection extends ImportChoices {
+  priority: TaskPriority | null;
+}
+
 /**
- * Crée la tâche avec les propriétés du ticket : titre, description (instruction
- * et propriétés Jira), priorité et libellés. Les libellés existants sont
- * réutilisés par nom, les autres créés. Si les libellés ne peuvent pas être
- * posés, la tâche est quand même créée et `labelError` l'explique.
+ * Crée la tâche avec les propriétés du ticket et les choix de la fiche :
+ * agent, projet (créé pour le sprint s'il le faut), objectif, tâche parente,
+ * priorité et libellés. Les libellés existants sont réutilisés par nom, les
+ * autres créés ; s'ils ne peuvent pas être posés, la tâche est quand même créée
+ * et `labelError` l'explique. Un échec de création du projet arrête tout :
+ * aucune tâche n'est créée hors de son sprint.
  */
 async function createTaskFromDraft(
   companyId: string,
   draft: ImportedTaskDraft,
-): Promise<CreatedTask & { labelError: string | null }> {
+  selection: ImportSelection,
+): Promise<CreatedTask & { labelError: string | null; createdProject: string | null }> {
   const base = `/api/companies/${encodeURIComponent(companyId)}`;
   let labelIds: string[] = [];
   let labelError: string | null = null;
@@ -156,16 +181,34 @@ async function createTaskFromDraft(
       labelError = errorText(err);
     }
   }
+  let projectId: string | null = null;
+  let createdProject: string | null = null;
+  if (selection.project.kind === "existing") projectId = selection.project.id;
+  if (selection.project.kind === "sprint" && draft.sprint) {
+    const project = await hostJson<{ id: string; name: string }>(`${base}/projects`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...projectBodyForSprint(draft.sprint),
+        ...(selection.goalId ? { goalIds: [selection.goalId] } : {}),
+      }),
+    });
+    projectId = project.id;
+    createdProject = project.name;
+  }
   const task = await hostJson<CreatedTask>(`${base}/issues`, {
     method: "POST",
     body: JSON.stringify({
       title: draft.title,
       description: draft.description,
-      ...(draft.priority ? { priority: draft.priority } : {}),
+      ...(selection.priority ? { priority: selection.priority } : {}),
       ...(labelIds.length > 0 ? { labelIds } : {}),
+      ...(selection.agentId ? { assigneeAgentId: selection.agentId } : {}),
+      ...(projectId ? { projectId } : {}),
+      ...(selection.goalId ? { goalId: selection.goalId } : {}),
+      ...(selection.parentId ? { parentId: selection.parentId } : {}),
     }),
   });
-  return { ...task, labelError };
+  return { ...task, labelError, createdProject };
 }
 
 function errorText(err: unknown): string {
@@ -641,21 +684,14 @@ function ImportForm({
     );
   };
 
+  const [draft, setDraft] = useState<ImportedTaskDraft | null>(null);
+
+  /** Lit le ticket et ouvre la fiche de création, préremplie. */
   async function create(value: string): Promise<boolean> {
     setBusy(value);
     setError(null);
     try {
-      const draft = (await prepareImport({ companyId, input: value })) as ImportedTaskDraft;
-      const task = await createTaskFromDraft(companyId, draft);
-      const ref = task.identifier ?? task.id;
-      toast({
-        title: task.identifier ? `Tâche ${task.identifier} créée depuis ${draft.key}.` : `Tâche créée depuis ${draft.key}.`,
-        body: task.labelError ? `Libellés non posés : ${task.labelError}` : undefined,
-        tone: task.labelError ? "warn" : "success",
-        action: { label: "Ouvrir", href: navigation.resolveHref(`/issues/${ref}`) },
-      });
-      onCreated?.(task);
-      navigation.navigate(`/issues/${ref}`);
+      setDraft((await prepareImport({ companyId, input: value })) as ImportedTaskDraft);
       return true;
     } catch (err) {
       setError(errorText(err));
@@ -663,6 +699,35 @@ function ImportForm({
     } finally {
       setBusy(null);
     }
+  }
+
+  function created(task: CreatedTask & { labelError: string | null; createdProject: string | null }, key: string) {
+    const ref = task.identifier ?? task.id;
+    const notes = [
+      task.createdProject ? `Projet « ${task.createdProject} » créé.` : null,
+      task.labelError ? `Libellés non posés : ${task.labelError}` : null,
+    ].filter(Boolean);
+    toast({
+      title: task.identifier ? `Tâche ${task.identifier} créée depuis ${key}.` : `Tâche créée depuis ${key}.`,
+      body: notes.length > 0 ? notes.join(" ") : undefined,
+      tone: task.labelError ? "warn" : "success",
+      action: { label: "Ouvrir", href: navigation.resolveHref(`/issues/${ref}`) },
+    });
+    setDraft(null);
+    onCreated?.(task);
+    navigation.navigate(`/issues/${ref}`);
+  }
+
+  if (draft) {
+    return (
+      <ImportSheet
+        companyId={companyId}
+        draft={draft}
+        knownParentTasks={draft.parentKey ? (existing?.get(draft.parentKey) ?? []).map((t) => t.id) : []}
+        onCancel={() => setDraft(null)}
+        onCreated={(task) => created(task, draft.key)}
+      />
+    );
   }
 
   async function listMine() {
@@ -740,6 +805,270 @@ function ImportForm({
       ) : null}
     </div>
   );
+}
+
+// ── Fiche de création : agent, projet du sprint, objectif, parent… ──────
+
+const PRIORITY_OPTIONS: Array<{ id: TaskPriority; label: string }> = [
+  { id: "critical", label: "Critique" },
+  { id: "high", label: "Haute" },
+  { id: "medium", label: "Moyenne" },
+  { id: "low", label: "Basse" },
+];
+
+const NONE = "__none__";
+const SPRINT_PROJECT = "__sprint__";
+
+interface ParentTask {
+  id: string;
+  identifier: string | null;
+  title: string;
+  status: string;
+}
+
+export interface SheetData {
+  agents: HostAgent[];
+  projects: HostProject[];
+  goals: HostGoal[];
+  parent: ParentTask | null;
+}
+
+/** Charge ce que la fiche propose : agents, projets, objectifs, et la tâche du ticket parent. */
+async function loadSheetData(companyId: string, parentIds: string[]): Promise<SheetData> {
+  const base = `/api/companies/${encodeURIComponent(companyId)}`;
+  const [agents, projects, goals] = await Promise.all([
+    hostJson<HostAgent[]>(`${base}/agents`),
+    hostJson<HostProject[]>(`${base}/projects`),
+    hostJson<HostGoal[]>(`${base}/goals`).catch(() => [] as HostGoal[]),
+  ]);
+  let parent: ParentTask | null = null;
+  for (const id of parentIds) {
+    try {
+      const task = await hostJson<ParentTask & { companyId?: string }>(`/api/issues/${encodeURIComponent(id)}`);
+      if (task.companyId && task.companyId !== companyId) continue;
+      if (task.status === "cancelled") continue;
+      parent = task;
+      break;
+    } catch {
+      /* tâche supprimée ou inaccessible : candidate suivante */
+    }
+  }
+  return { agents, projects: projects.filter((p) => !p.archivedAt), goals, parent };
+}
+
+export function ImportSheet({
+  companyId,
+  draft,
+  knownParentTasks,
+  onCancel,
+  onCreated,
+  preloaded,
+}: {
+  companyId: string;
+  draft: ImportedTaskDraft;
+  /** Tâches liées au ticket parent connues de la page (en plus de celles du plugin). */
+  knownParentTasks: string[];
+  onCancel: () => void;
+  onCreated: (task: CreatedTask & { labelError: string | null; createdProject: string | null }) => void;
+  /** Données déjà chargées (tests) : la fiche s'affiche sans attendre l'hôte. */
+  preloaded?: SheetData;
+}) {
+  const initialSelection = (loaded: SheetData): ImportSelection => ({
+    ...defaultImportChoices({ draft, ...loaded, parentTaskId: loaded.parent?.id ?? null }),
+    priority: draft.priority,
+  });
+  const remember = usePluginAction("remember-import-choices");
+  const indexTask = usePluginAction("index-created-task");
+  const [data, setData] = useState<SheetData | null>(preloaded ?? null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<ImportSelection | null>(preloaded ? initialSelection(preloaded) : null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (preloaded) return;
+    let cancelled = false;
+    const parentIds = [...new Set([...draft.parentTaskIds, ...knownParentTasks])];
+    loadSheetData(companyId, parentIds)
+      .then((loaded) => {
+        if (cancelled) return;
+        setData(loaded);
+        setSelection(initialSelection(loaded));
+      })
+      .catch((err) => !cancelled && setLoadError(errorText(err)));
+    return () => {
+      cancelled = true;
+    };
+    // La fiche est remontée pour chaque ticket : `draft` ne change pas pendant sa vie.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
+
+  if (loadError) {
+    return (
+      <div className="flex flex-col gap-3">
+        <ErrorNotice>{loadError}</ErrorNotice>
+        <div>
+          <Button variant="outline" size="sm" onClick={onCancel}>
+            Retour
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (!data || !selection) return <Loading label="Préparation de la tâche…" />;
+
+  const update = (patch: Partial<ImportSelection>) => setSelection((s) => (s ? { ...s, ...patch } : s));
+  const agents = assignableAgents(data.agents);
+  const agentName = agents.find((a) => a.id === selection.agentId)?.name ?? null;
+
+  const projectOptions = [
+    ...(draft.sprint && !matchedProjectId(draft, data)
+      ? [{ id: SPRINT_PROJECT, label: `Nouveau projet « ${draft.sprint.name} »`, hint: "Créé pour le sprint Jira" }]
+      : []),
+    ...data.projects.map((p) => ({ id: p.id, label: p.name, hint: p.id === matchedProjectId(draft, data) ? "Projet du sprint" : null })),
+    { id: NONE, label: "Aucun projet" },
+  ];
+  const projectValue = selection.project.kind === "existing" ? selection.project.id : selection.project.kind === "sprint" ? SPRINT_PROJECT : NONE;
+
+  function chooseProject(id: string) {
+    const project: ProjectChoice = id === SPRINT_PROJECT ? { kind: "sprint" } : id === NONE ? { kind: "none" } : { kind: "existing", id };
+    const chosen = project.kind === "existing" ? (data!.projects.find((p) => p.id === project.id) ?? null) : null;
+    update({ project, goalId: goalForProject(chosen, data!.goals, selection!.goalId) });
+  }
+
+  async function submit() {
+    if (!selection) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const task = await createTaskFromDraft(companyId, draft, selection);
+      void remember({ companyId, agentId: selection.agentId, goalId: selection.goalId }).catch(() => undefined);
+      void indexTask({ companyId, key: draft.key, issueId: task.id }).catch(() => undefined);
+      onCreated(task);
+    } catch (err) {
+      setError(errorText(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        <ExternalKey href={draft.url}>{draft.key}</ExternalKey>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium" title={draft.title}>
+          {draft.title.replace(`[${draft.key}] `, "")}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        <PropertyRow label="Agent">
+          <EntityPicker
+            label="Agent assigné"
+            value={selection.agentId ?? NONE}
+            placeholder="Personne"
+            searchPlaceholder="Chercher un agent…"
+            options={[
+              ...agents.map((a) => ({ id: a.id, label: a.name, hint: (a as HostAgent & { role?: string }).role ?? null })),
+              { id: NONE, label: "Personne (à assigner plus tard)" },
+            ]}
+            onChange={(id) => update({ agentId: id === NONE ? null : id })}
+            disabled={busy}
+          />
+        </PropertyRow>
+        <PropertyRow label="Projet">
+          <EntityPicker
+            label="Projet"
+            value={projectValue}
+            placeholder="Aucun projet"
+            searchPlaceholder="Chercher un projet…"
+            options={projectOptions}
+            onChange={chooseProject}
+            disabled={busy}
+          />
+        </PropertyRow>
+        <PropertyRow label="Objectif">
+          <EntityPicker
+            label="Objectif"
+            value={selection.goalId ?? NONE}
+            placeholder="Aucun objectif"
+            searchPlaceholder="Chercher un objectif…"
+            options={[
+              ...data.goals.filter((g) => g.status !== "cancelled").map((g) => ({ id: g.id, label: g.title })),
+              { id: NONE, label: "Aucun objectif" },
+            ]}
+            onChange={(id) => update({ goalId: id === NONE ? null : id })}
+            disabled={busy}
+          />
+        </PropertyRow>
+        {draft.parentKey ? (
+          <PropertyRow label="Tâche parente">
+            {data.parent ? (
+              <EntityPicker
+                label="Tâche parente"
+                value={selection.parentId ?? NONE}
+                placeholder="Aucune"
+                searchPlaceholder="Chercher…"
+                options={[
+                  {
+                    id: data.parent.id,
+                    label: `${data.parent.identifier ?? ""} ${data.parent.title}`.trim(),
+                    hint: `Tâche du ticket parent ${draft.parentKey}`,
+                  },
+                  { id: NONE, label: "Aucune" },
+                ]}
+                onChange={(id) => update({ parentId: id === NONE ? null : id })}
+                disabled={busy}
+              />
+            ) : (
+              <p className="pt-2 text-xs text-muted-foreground">Aucune : le ticket parent {draft.parentKey} n'a pas de tâche.</p>
+            )}
+          </PropertyRow>
+        ) : null}
+        <PropertyRow label="Priorité">
+          <EntityPicker
+            label="Priorité"
+            value={selection.priority ?? "medium"}
+            placeholder="Moyenne"
+            searchPlaceholder="Chercher…"
+            options={PRIORITY_OPTIONS}
+            onChange={(id) => update({ priority: id as TaskPriority })}
+            disabled={busy}
+          />
+        </PropertyRow>
+        {draft.labels.length > 0 ? (
+          <PropertyRow label="Libellés">
+            <p className="truncate pt-2 text-xs" title={draft.labels.join(", ")}>
+              {draft.labels.join(", ")}
+            </p>
+          </PropertyRow>
+        ) : null}
+      </div>
+      <Muted className="text-xs">
+        {agentName
+          ? `La tâche sera assignée à ${agentName}, qui la prendra en charge dès sa création.`
+          : "Sans agent, la tâche reste dans le backlog jusqu'à ce que tu l'assignes."}
+      </Muted>
+      {error ? <ErrorNotice>{error}</ErrorNotice> : null}
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+          Retour
+        </Button>
+        <Button type="submit" size="sm" autoFocus disabled={busy}>
+          {busy ? <Spinner label="Création…" /> : null}
+          {agentName ? `Créer et assigner à ${agentName}` : "Créer la tâche"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function matchedProjectId(draft: ImportedTaskDraft, data: SheetData): string | null {
+  return projectForSprint(draft.sprint?.name ?? null, data.projects)?.id ?? null;
 }
 
 // ── Page tâche (mode classique) : onglet ────────────────────────────────

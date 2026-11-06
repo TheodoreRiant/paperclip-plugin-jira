@@ -17,10 +17,12 @@ import {
   useEffect,
   useId,
   useRef,
+  useState,
   type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
   type CSSProperties,
   type InputHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import {
@@ -32,6 +34,8 @@ import {
   CircleHelp,
   CircleMinus,
   CloudOff,
+  Check,
+  ChevronDown,
   Key,
   LoaderCircle,
   Search,
@@ -445,5 +449,142 @@ export function TaskStatusGlyph({ status }: { status: string }) {
       )}
       <span className="sr-only">{label}</span>
     </span>
+  );
+}
+
+// ── Sélecteur d'entité (recette du choix d'assigné du composeur de l'hôte) ─
+//
+// Déclencheur compact (`h-8 … text-xs`), puis recherche et liste au clavier.
+// La liste s'ouvre dans le flux, sous le déclencheur, et non en popover : dans
+// une fenêtre, elle ne peut donc pas sortir de l'écran.
+
+export interface PickerOption {
+  id: string;
+  label: string;
+  /** Texte secondaire (rôle, statut…). */
+  hint?: string | null;
+}
+
+export function EntityPicker({
+  label,
+  value,
+  options,
+  onChange,
+  placeholder,
+  searchPlaceholder,
+  disabled,
+}: {
+  /** Nom du champ (lu par les lecteurs d'écran). */
+  label: string;
+  /** Id de l'option choisie ; `null` : aucune. */
+  value: string | null;
+  options: PickerOption[];
+  onChange: (id: string) => void;
+  /** Texte du déclencheur sans choix. */
+  placeholder: string;
+  searchPlaceholder: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const selected = options.find((o) => o.id === value) ?? null;
+  const q = query.trim().toLowerCase();
+  const visible = q ? options.filter((o) => `${o.label} ${o.hint ?? ""}`.toLowerCase().includes(q)) : options;
+
+  function pick(id: string) {
+    onChange(id);
+    setOpen(false);
+    setQuery("");
+  }
+
+  function onKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActive((i) => (visible.length ? (i + step + visible.length) % visible.length : 0));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      const option = visible[Math.min(active, visible.length - 1)];
+      if (option) pick(option.id);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div className="flex min-w-0 flex-col">
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => {
+          setOpen((o) => !o);
+          setQuery("");
+          setActive(Math.max(0, options.findIndex((o) => o.id === value)));
+        }}
+        className={buttonClass("ghost", "toolbar", "max-w-full justify-start px-2.5 text-xs")}
+      >
+        <span className={cn("truncate", !selected && "text-muted-foreground")}>{selected?.label ?? placeholder}</span>
+        <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="rounded-md border border-border p-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" aria-hidden="true" />
+            <input
+              autoFocus
+              type="search"
+              aria-label={searchPlaceholder}
+              placeholder={searchPlaceholder}
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActive(0);
+              }}
+              onKeyDown={onKeyDown}
+              className="h-9 w-full rounded-md border border-border bg-background pl-8 pr-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+          <div className="mt-2 min-h-0 max-h-60 overflow-y-auto overscroll-contain touch-pan-y" role="listbox" aria-label={label}>
+            {visible.length === 0 ? <p className="px-2 py-2 text-sm text-muted-foreground">Aucun résultat.</p> : null}
+            {visible.map((option, i) => (
+              <button
+                key={option.id}
+                type="button"
+                role="option"
+                aria-selected={option.id === value}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => pick(option.id)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left focus-visible:outline-none",
+                  active === i ? "bg-accent" : "hover:bg-accent",
+                )}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">{option.label}</span>
+                  {option.hint ? <span className="block truncate text-xs text-muted-foreground">{option.hint}</span> : null}
+                </span>
+                {option.id === value ? <Check className="size-4 shrink-0" aria-hidden="true" /> : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Ligne de la fiche : libellé à gauche, valeur à droite (recette du panneau Propriétés). */
+export function PropertyRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-start gap-3">
+      <span className="w-24 shrink-0 pt-2 text-xs text-muted-foreground">{label}</span>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
   );
 }

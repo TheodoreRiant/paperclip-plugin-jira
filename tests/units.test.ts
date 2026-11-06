@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "../src/config.js";
-import { JiraError, sprintName, type JiraIssueSummary } from "../src/jira-client.js";
+import { JiraError, pickSprint, sprintName, type JiraIssueSummary, type JiraSprint } from "../src/jira-client.js";
 import { issueKeyFromInput, issueKeyFromUrl, normalizeIssueKey } from "../src/jira-url.js";
 import { issueKeysInText, parseLinksDocument, renderLinksDocument } from "../src/links.js";
 import { resultFromError, snapshotFromIssue, statusLabelFor } from "../src/status.js";
 import { desiredLabels, mergeRequests, planLabels, registryFrom, statusLabelName } from "../src/label-sync.js";
-import { HOST_LABEL_COLORS, importInstruction, labelColor, labelNames, matchLabels, priorityFromJira } from "../src/import.js";
+import {
+  HOST_LABEL_COLORS,
+  asPreferences,
+  defaultImportChoices,
+  goalForProject,
+  importInstruction,
+  labelColor,
+  labelNames,
+  matchLabels,
+  priorityFromJira,
+  projectBodyForSprint,
+  projectForSprint,
+} from "../src/import.js";
 
 const HOST = "acme.atlassian.net";
 const SITE = `https://${HOST}`;
@@ -243,5 +255,104 @@ describe("libellés tenus à jour depuis Jira", () => {
       { name: "Story", color: "a" },
       { name: "Bug", color: "c" },
     ]);
+  });
+});
+
+describe("fiche de création : sprint, projet, agent, objectif", () => {
+  const SPRINT: JiraSprint = { name: "BO Sprint 22", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Livrer la connexion" };
+  const PROJECTS = [
+    { id: "p-app", name: "Application" },
+    { id: "p-21", name: "Sprint 21", goalIds: [] },
+    { id: "p-22", name: "Sprint 22", goalIds: ["g-1"] },
+    { id: "p-old", name: "BO Sprint 22", archivedAt: "2026-10-01T00:00:00Z" },
+  ];
+  const GOALS = [
+    { id: "g-1", title: "Confort et productivité" },
+    { id: "g-2", title: "Économie de tokens" },
+  ];
+  const AGENTS = [
+    { id: "a-1", name: "Flitwick", status: "idle" },
+    { id: "a-2", name: "Ancien", status: "terminated" },
+  ];
+
+  it("retient l'actif, sinon le prochain, sinon le dernier sprint, avec dates et objectif", () => {
+    const raw = [
+      { name: "Sprint 21", state: "closed", endDate: "2026-10-30T17:00:00.000Z" },
+      { name: " Sprint 22 ", state: "active", startDate: "2026-11-02T08:00:00.000Z", endDate: "2026-11-13T17:00:00.000Z", goal: " Livrer " },
+    ];
+    expect(pickSprint(raw)).toEqual({ name: "Sprint 22", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Livrer" });
+    expect(pickSprint([{ name: "Sprint 21", state: "closed" }, { name: "Sprint 23", state: "future" }])?.name).toBe("Sprint 23");
+    expect(pickSprint([{ name: "S", state: "bizarre", endDate: "pas une date" }])).toEqual({
+      name: "S",
+      state: null,
+      startDate: null,
+      endDate: null,
+      goal: null,
+    });
+    expect(pickSprint(null)).toBeNull();
+    expect(sprintName(raw)).toBe("Sprint 22");
+  });
+
+  it("trouve le projet du sprint : même nom, sinon même numéro s'il est unique ; ignore les archivés", () => {
+    expect(projectForSprint("sprint 21", PROJECTS)?.id).toBe("p-21");
+    expect(projectForSprint("BO Sprint 22", PROJECTS)?.id).toBe("p-22");
+    expect(projectForSprint("Sprint 23", PROJECTS)).toBeNull();
+    expect(projectForSprint("Itération 4", PROJECTS)).toBeNull();
+    expect(projectForSprint("BO Sprint 21", [...PROJECTS, { id: "x", name: "Équipe B sprint 21" }])).toBeNull();
+    expect(projectForSprint(null, PROJECTS)).toBeNull();
+  });
+
+  it("décrit le projet à créer pour un sprint", () => {
+    expect(projectBodyForSprint(SPRINT)).toEqual({
+      name: "BO Sprint 22",
+      status: "in_progress",
+      icon: "rocket",
+      color: labelColor("BO Sprint 22"),
+      targetDate: "2026-11-13",
+      description: "Livrer la connexion\n\nSprint Jira du 2026-11-02 au 2026-11-13.",
+    });
+    expect(projectBodyForSprint({ name: "S", state: "future", startDate: null, endDate: null, goal: null })).toEqual({
+      name: "S",
+      status: "planned",
+      icon: "rocket",
+      color: labelColor("S"),
+    });
+    expect(projectBodyForSprint({ ...SPRINT, state: "closed" }).status).toBe("completed");
+  });
+
+  it("propose le dernier agent, le projet du sprint et son objectif, la tâche parente", () => {
+    const choices = defaultImportChoices({
+      draft: { sprint: SPRINT, preferences: { agentId: "a-1", goalId: "g-2" } },
+      agents: AGENTS,
+      projects: PROJECTS,
+      goals: GOALS,
+      parentTaskId: "t-parent",
+    });
+    expect(choices).toEqual({ agentId: "a-1", project: { kind: "existing", id: "p-22" }, goalId: "g-1", parentId: "t-parent" });
+  });
+
+  it("sans projet pour le sprint : en propose un nouveau ; sans sprint : aucun projet", () => {
+    const base = { agents: AGENTS, projects: PROJECTS, goals: GOALS, parentTaskId: null };
+    const newSprint = defaultImportChoices({ ...base, draft: { sprint: { ...SPRINT, name: "Sprint 30" }, preferences: { agentId: null, goalId: "g-2" } } });
+    expect(newSprint).toMatchObject({ project: { kind: "sprint" }, goalId: "g-2", agentId: null });
+    const noSprint = defaultImportChoices({ ...base, draft: { sprint: null, preferences: { agentId: null, goalId: null } } });
+    expect(noSprint.project).toEqual({ kind: "none" });
+  });
+
+  it("n'assigne pas un agent supprimé ni un objectif disparu", () => {
+    const choices = defaultImportChoices({
+      draft: { sprint: null, preferences: { agentId: "a-2", goalId: "g-x" } },
+      agents: AGENTS,
+      projects: PROJECTS,
+      goals: GOALS,
+      parentTaskId: null,
+    });
+    expect(choices).toMatchObject({ agentId: null, goalId: null });
+    expect(goalForProject({ id: "p", name: "p", goalIds: ["g-x"] }, GOALS, "g-2")).toBe("g-2");
+  });
+
+  it("lit des préférences stockées en ignorant ce qui est invalide", () => {
+    expect(asPreferences({ agentId: " a-1 ", goalId: 3 })).toEqual({ agentId: "a-1", goalId: null });
+    expect(asPreferences(null)).toEqual({ agentId: null, goalId: null });
   });
 });

@@ -63,6 +63,18 @@ export interface JiraImportDetails {
   /** `AAAA-MM-JJ`. */
   dueDate: string | null;
   created: string | null;
+  /** Sprint du ticket (même choix que `sprintName`) ; `null` sans Jira Software ou hors sprint. */
+  sprint: JiraSprint | null;
+}
+
+export interface JiraSprint {
+  name: string;
+  state: "active" | "future" | "closed" | null;
+  /** `AAAA-MM-JJ`. */
+  startDate: string | null;
+  /** `AAAA-MM-JJ`. */
+  endDate: string | null;
+  goal: string | null;
 }
 
 /** Taille de lot pour `key in (...)` : reste loin des limites de longueur JQL. */
@@ -239,6 +251,7 @@ export class JiraClient {
           : null,
         dueDate: stringOrNull(fields.duedate),
         created: stringOrNull(fields.created),
+        sprint: this.sprintFieldId ? pickSprint(fields[this.sprintFieldId]) : null,
       },
     };
   }
@@ -328,13 +341,31 @@ export class JiraClient {
  * (un ticket reporté garde la liste de ses anciens sprints).
  */
 export function sprintName(value: unknown): string | null {
+  return pickSprint(value)?.name ?? null;
+}
+
+/** Sprint retenu pour un ticket : l'actif, sinon le prochain, sinon le dernier. */
+export function pickSprint(value: unknown): JiraSprint | null {
   if (!Array.isArray(value)) return null;
   const sprints = value.filter(
-    (s): s is { name: string; state?: unknown } => Boolean(s) && typeof s === "object" && typeof (s as { name?: unknown }).name === "string",
+    (s): s is Record<string, unknown> & { name: string } =>
+      Boolean(s) && typeof s === "object" && typeof (s as { name?: unknown }).name === "string" && Boolean((s as { name: string }).name.trim()),
   );
   const pick =
     sprints.find((s) => s.state === "active") ?? sprints.find((s) => s.state === "future") ?? sprints[sprints.length - 1];
-  return pick?.name.trim() || null;
+  if (!pick) return null;
+  const state = pick.state === "active" || pick.state === "future" || pick.state === "closed" ? pick.state : null;
+  return {
+    name: pick.name.trim(),
+    state,
+    startDate: dayOf(pick.startDate),
+    endDate: dayOf(pick.endDate),
+    goal: typeof pick.goal === "string" && pick.goal.trim() ? pick.goal.trim() : null,
+  };
+}
+
+function dayOf(value: unknown): string | null {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
 }
 
 function stringOrNull(value: unknown): string | null {

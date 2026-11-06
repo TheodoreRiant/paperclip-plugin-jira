@@ -1,4 +1,4 @@
-import type { JiraImportDetails, JiraIssueSummary } from "./jira-client.js";
+import type { JiraImportDetails, JiraIssueSummary, JiraSprint } from "./jira-client.js";
 
 export const MAX_TITLE_LENGTH = 240;
 /** Longueur maximale d'un nom de libellé Paperclip. */
@@ -16,6 +16,28 @@ export interface ImportedTaskDraft {
   priority: TaskPriority | null;
   /** Noms des libellés à poser sur la tâche : type du ticket puis libellés Jira, sans doublon. */
   labels: string[];
+  /** Sprint du ticket : sert à choisir (ou créer) le projet de la tâche. */
+  sprint: JiraSprint | null;
+  /** Ticket parent (épopée, story d'une sous-tâche). */
+  parentKey: string | null;
+  /** Tâches Paperclip déjà liées au ticket parent, connues du plugin : candidates comme tâche parente. */
+  parentTaskIds: string[];
+  /** Derniers choix faits à la création (agent, objectif) : proposés par défaut. */
+  preferences: ImportPreferences;
+}
+
+export interface ImportPreferences {
+  agentId: string | null;
+  goalId: string | null;
+}
+
+export const NO_PREFERENCES: ImportPreferences = { agentId: null, goalId: null };
+
+/** Lit des préférences stockées, en ignorant ce qui n'a pas la bonne forme. */
+export function asPreferences(value: unknown): ImportPreferences {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const id = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  return { agentId: id(record.agentId), goalId: id(record.goalId) };
 }
 
 const PRIORITY_BY_JIRA_NAME: Record<string, TaskPriority> = {
@@ -78,6 +100,10 @@ export function draftTaskFromTicket(
     description: `${parts.join("\n\n")}\n`,
     priority: priorityFromJira(issue.priority),
     labels: labelNames([issue.issueType, ...issue.labels]),
+    sprint: details.sprint,
+    parentKey: details.parent?.key ?? null,
+    parentTaskIds: [],
+    preferences: NO_PREFERENCES,
   };
 }
 
@@ -88,6 +114,7 @@ const EMPTY_DETAILS: JiraImportDetails = {
   parent: null,
   dueDate: null,
   created: null,
+  sprint: null,
 };
 
 function propertiesTable(issue: JiraIssueSummary, details: JiraImportDetails): string {
@@ -170,4 +197,106 @@ export function matchLabels(names: string[], existing: HostLabel[]): { ids: stri
     else missing.push(name);
   }
   return { ids, missing };
+}
+
+// ── Choix par défaut de la fiche de création ────────────────────────────
+
+export interface HostProject {
+  id: string;
+  name: string;
+  status?: string | null;
+  archivedAt?: string | null;
+  goalIds?: string[] | null;
+}
+
+export interface HostAgent {
+  id: string;
+  name: string;
+  status?: string | null;
+}
+
+export interface HostGoal {
+  id: string;
+  title: string;
+  status?: string | null;
+}
+
+/** Projet de la tâche : un projet existant, un projet à créer pour le sprint, ou aucun. */
+export type ProjectChoice = { kind: "existing"; id: string } | { kind: "sprint" } | { kind: "none" };
+
+function normalizeName(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function sprintNumber(value: string): string | null {
+  return /\bsprint\s*#?\s*(\d+)\b/i.exec(value)?.[1] ?? null;
+}
+
+/**
+ * Projet Paperclip du sprint : même nom (casse, accents et espaces ignorés),
+ * sinon même numéro de sprint (« BO Sprint 21 » ↔ « Sprint 21 »), si ce
+ * numéro désigne un seul projet. Les projets archivés sont ignorés.
+ */
+export function projectForSprint<P extends HostProject>(sprintName: string | null, projects: P[]): P | null {
+  if (!sprintName) return null;
+  const live = projects.filter((p) => !p.archivedAt);
+  const wanted = normalizeName(sprintName);
+  const exact = live.find((p) => normalizeName(p.name) === wanted);
+  if (exact) return exact;
+  const number = sprintNumber(sprintName);
+  if (!number) return null;
+  const sameNumber = live.filter((p) => sprintNumber(p.name) === number);
+  return sameNumber.length === 1 ? sameNumber[0]! : null;
+}
+
+/** Corps de `POST /api/companies/:id/projects` pour le projet d'un sprint. */
+export function projectBodyForSprint(sprint: JiraSprint): Record<string, unknown> {
+  const status = sprint.state === "active" ? "in_progress" : sprint.state === "closed" ? "completed" : "planned";
+  const period = [sprint.startDate && `du ${sprint.startDate}`, sprint.endDate && `au ${sprint.endDate}`].filter(Boolean).join(" ");
+  const description = [sprint.goal, period && `Sprint Jira ${period}.`].filter(Boolean).join("\n\n");
+  return {
+    name: sprint.name,
+    status,
+    icon: "rocket",
+    color: labelColor(sprint.name),
+    ...(sprint.endDate ? { targetDate: sprint.endDate } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
+/** Un agent peut recevoir une tâche s'il n'est ni supprimé ni en attente de validation. */
+export function assignableAgents<A extends HostAgent>(agents: A[]): A[] {
+  return agents.filter((a) => !["terminated", "pending_approval"].includes(a.status ?? ""));
+}
+
+export interface ImportChoices {
+  agentId: string | null;
+  project: ProjectChoice;
+  goalId: string | null;
+  parentId: string | null;
+}
+
+/**
+ * Choix proposés : le dernier agent choisi, le projet du sprint (à créer s'il
+ * n'existe pas), l'objectif du projet sinon le dernier choisi, et la tâche du
+ * ticket parent quand il y en a une.
+ */
+export function defaultImportChoices(input: {
+  draft: Pick<ImportedTaskDraft, "sprint" | "preferences">;
+  agents: HostAgent[];
+  projects: HostProject[];
+  goals: HostGoal[];
+  parentTaskId: string | null;
+}): ImportChoices {
+  const { draft, agents, projects, goals } = input;
+  const agentId = assignableAgents(agents).some((a) => a.id === draft.preferences.agentId) ? draft.preferences.agentId : null;
+  const matched = projectForSprint(draft.sprint?.name ?? null, projects);
+  const project: ProjectChoice = matched ? { kind: "existing", id: matched.id } : draft.sprint ? { kind: "sprint" } : { kind: "none" };
+  return { agentId, project, goalId: goalForProject(matched, goals, draft.preferences.goalId), parentId: input.parentTaskId };
+}
+
+/** Objectif proposé pour un projet : le sien s'il en a un, sinon `fallback` s'il existe encore. */
+export function goalForProject(project: HostProject | null, goals: HostGoal[], fallback: string | null): string | null {
+  const known = (id: string | null | undefined) => (id && goals.some((g) => g.id === id) ? id : null);
+  return known(project?.goalIds?.[0]) ?? known(fallback);
 }

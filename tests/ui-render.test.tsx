@@ -146,6 +146,35 @@ describe("écrans du plugin", () => {
     expect(ownStyles(html)).toEqual([]);
   });
 
+  it("fiche de création : agent, projet du sprint, objectif, parent, priorité, libellés", async () => {
+    const draft = {
+      key: "ABC-12",
+      url: ISSUE.url,
+      title: "[ABC-12] Corriger la connexion",
+      description: "",
+      priority: "high",
+      labels: ["Bug", "front"],
+      sprint: { name: "Sprint 30", state: "active", startDate: null, endDate: "2026-11-20", goal: null },
+      parentKey: "ABC-100",
+      parentTaskIds: ["t-parent"],
+      preferences: { agentId: "a-1", goalId: null },
+    };
+    const preloaded = {
+      agents: [{ id: "a-1", name: "Flitwick", status: "idle", role: "engineer" }],
+      projects: [{ id: "p-21", name: "Sprint 21" }],
+      goals: [{ id: "g-1", title: "Confort et productivité" }],
+      parent: { id: "t-parent", identifier: "ABC-90", title: "Refonte", status: "todo" },
+    };
+    const html = await render("ImportSheet", { companyId: "company-1", draft, knownParentTasks: [], onCancel: () => {}, onCreated: () => {}, preloaded });
+    expect(html).toContain("Flitwick");
+    expect(html).toContain("Nouveau projet « Sprint 30 »");
+    expect(html).toContain("ABC-90 Refonte");
+    expect(html).toContain("Haute");
+    expect(html).toContain("Bug, front");
+    expect(html).toContain("Créer et assigner à Flitwick");
+    expect(ownStyles(html)).toEqual([]);
+  });
+
   it("fenêtre du bouton, sur une tâche liée", async () => {
     const html = await render("JiraDialogBody", {
       companyId: "company-1",

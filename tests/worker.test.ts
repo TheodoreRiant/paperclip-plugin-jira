@@ -623,6 +623,27 @@ describe("créer une tâche depuis un ticket", () => {
     expect(draft.priority).toBe("medium");
   });
 
+  it("transmet le sprint, la tâche du ticket parent et les derniers choix", async () => {
+    jira.hasSprintField = true;
+    Object.assign(jira.issues.get("ABC-1")!, {
+      sprints: [{ name: "Sprint 22", state: "active", startDate: "2026-11-02T08:00:00.000Z", endDate: "2026-11-13T17:00:00.000Z", goal: "Connexion" }],
+      extra: { parent: { key: "ABC-100", fields: { summary: "Refonte" } } },
+    });
+    await harness.performAction("index-created-task", { key: "abc-100", issueId: "task-parent" }, { companyId: COMPANY });
+    await harness.performAction("remember-import-choices", { agentId: "agent-1", goalId: "goal-1" }, { companyId: COMPANY });
+
+    const draft = await harness.performAction<ImportedTaskDraft>("prepare-import", { input: "ABC-1" }, { companyId: COMPANY });
+    expect(draft.sprint).toEqual({ name: "Sprint 22", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Connexion" });
+    expect(draft.parentKey).toBe("ABC-100");
+    expect(draft.parentTaskIds).toEqual(["task-parent"]);
+    expect(draft.preferences).toEqual({ agentId: "agent-1", goalId: "goal-1" });
+  });
+
+  it("sans choix mémorisé ni parent : rien n'est proposé", async () => {
+    const draft = await harness.performAction<ImportedTaskDraft>("prepare-import", { input: "ABC-1" }, { companyId: COMPANY });
+    expect(draft).toMatchObject({ sprint: null, parentKey: null, parentTaskIds: [], preferences: { agentId: null, goalId: null } });
+  });
+
   it("refuse une saisie invalide ou un ticket inexistant", async () => {
     await expect(harness.performAction("prepare-import", { input: "bonjour" }, { companyId: COMPANY })).rejects.toThrow(
       /ni une clé Jira/,

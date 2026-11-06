@@ -9,7 +9,7 @@ export const JIRA_PAGE_ROUTE = "jira";
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
   apiVersion: 1,
-  version: "0.6.0",
+  version: "0.7.0",
   displayName: "Jira link",
   description:
     "Lie une tâche Paperclip à un ticket Jira Cloud : pastille de statut, bouton « Jira » dans la barre du haut, page Jira (liens, écarts de statut, création de tâche depuis un ticket) libellés d'état et d'étiquettes tenus à jour, et outil de lecture pour les agents. Lecture seule côté Jira.",
