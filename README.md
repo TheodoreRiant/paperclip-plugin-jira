@@ -1,5 +1,11 @@
 # paperclip-plugin-jira
 
+> **Retiré.** Ce plugin est remplacé par la synchro Jira intégrée à [betterclip](https://github.com/TheodoreRiant/betterclip) : connexion Atlassian personnelle, tickets importés comme tâches (numéro = clé Jira), état et champs Jira natifs, vues de suivi. Il n'est plus maintenu.
+>
+> **Pour le retirer d'une instance betterclip** : Réglages → Jira → « Ancien plugin Jira link » → **Reprendre ses données et le retirer** (administrateur de l'instance). Le site Jira de sa configuration est repris dans les sociétés qui n'en ont pas, ses libellés sont retirés des tâches, puis il est désinstallé avec sa configuration. Les tâches qu'il reliait prennent la clé de leur ticket à la synchro. Supprimez ensuite le secret de son jeton d'API s'il ne sert plus.
+>
+> La documentation ci-dessous décrit la dernière version (0.7.0), pour une instance Paperclip sans betterclip.
+
 Plugin [Paperclip](https://github.com/paperclipai/paperclip) qui lie une tâche à un ou plusieurs tickets **Jira Cloud** et affiche leur statut. Le plugin ne fait que lire Jira : il n'y écrit jamais.
 
 ## Fonctionnalités
